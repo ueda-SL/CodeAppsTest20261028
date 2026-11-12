@@ -1,0 +1,667 @@
+"""
+Copilot Studio エージェント設定スクリプト — テーマ非依存テンプレート
+
+★ 本スクリプトはテンプレートです。エージェント名・Instructions・推奨プロンプト等の
+  「テーマ定義」セクション（{...} プレースホルダー）を、設計フェーズで決めた内容に書き換えてから実行してください。
+★ API ヘルパー、トピック削除、生成オーケストレーション有効化、PvaPublish のパターンは共通テンプレートとして再利用できます。
+
+Phase 3: provision_agent.py で作成済みの Bot に対して構築設定を適用
+  → カスタムトピック全削除 → 生成オーケストレーション有効化
+  → GPT Instructions 設定 → 公開 → 説明の設定
+  ★ ナレッジ・MCP Server はユーザーが UI で手動追加
+
+★ セキュリティ（認証モード）とチャネル公開は別スクリプトに分離しています。
+  デプロイは以下の順に実行してください:
+    1. python deploy_agent.py         … 構築（本スクリプト）
+    2. python set_agent_security.py   … セキュリティ設定（認証なし / Microsoft 認証）→ 公開
+    3. python set_agent_channels.py   … チャネル選択（Web / Teams / Copilot）→ 公開
+
+前提:
+    - provision_agent.py plan/apply でエージェントを事前に作成済み
+    - BOT_ID を .env または引数で指定（省略時は AGENT_NAME で検索）
+
+使い方:
+    1. python provision_agent.py plan ... で作成planを生成・承認
+    2. python provision_agent.py apply --expected-hash <sha256> で作成
+    3. .env に BOT_ID=<作成した Bot のID> を追加（または AGENT_NAME で検索）
+    4. python .github/skills/copilot-studio/scripts/deploy_agent.py
+"""
+
+import json
+import os
+import sys
+import time
+
+import re
+
+# スキルフォルダと共通認証モジュールを sys.path に追加
+_this_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _this_dir)
+sys.path.insert(0, os.path.join(_this_dir, "..", "..", "standard", "scripts"))
+
+import base64
+import requests
+from dotenv import load_dotenv
+from auth_helper import get_token, DATAVERSE_URL as _DV_URL
+
+load_dotenv()
+
+# ── 環境変数 ────────────────────────────────────────────────
+DATAVERSE_URL = _DV_URL
+SOLUTION_NAME = os.environ.get("SOLUTION_NAME", "SampleSolution")
+PREFIX = os.environ.get("PUBLISHER_PREFIX", "geek")
+
+# ═════════════════════════════════════════════════════════════════
+#  テーマ定義（プレースホルダー）— 使用前に必ずテーマに合わせて置換する
+#  設計フェーズ（設計提示 → ユーザー承認）で決めた内容に書き換えること。
+#  以下の `{...}` はフォーマットを示すプレースホルダーで、特定テーマを意図しない。
+# ═════════════════════════════════════════════════════════════════
+
+BOT_NAME = os.getenv("AGENT_NAME", "{エージェント名}")
+BOT_SCHEMA = os.getenv("BOT_SCHEMA", f"{PREFIX}_Assistant")
+
+# ── API ヘルパー ─────────────────────────────────────────
+
+def get_headers() -> dict:
+    token = get_token()
+    return {
+        "Authorization": f"Bearer {token}",
+        "OData-MaxVersion": "4.0",
+        "OData-Version": "4.0",
+        "Accept": "application/json",
+        "Content-Type": "application/json; charset=utf-8",
+        "MSCRM.SolutionName": SOLUTION_NAME,
+    }
+
+
+def api_get(path, params=None):
+    r = requests.get(f"{DATAVERSE_URL}/api/data/v9.2/{path}",
+                     headers=get_headers(), params=params)
+    r.raise_for_status()
+    return r.json()
+
+
+def api_post(path, body):
+    r = requests.post(f"{DATAVERSE_URL}/api/data/v9.2/{path}",
+                      headers=get_headers(), json=body)
+    if not r.ok:
+        print(f"  API ERROR {r.status_code}: {r.text[:500]}")
+    r.raise_for_status()
+    return r
+
+
+def api_patch(path, body):
+    r = requests.patch(f"{DATAVERSE_URL}/api/data/v9.2/{path}",
+                       headers=get_headers(), json=body)
+    if not r.ok:
+        print(f"  API ERROR {r.status_code}: {r.text[:500]}")
+    r.raise_for_status()
+    return r
+
+
+def api_delete(path):
+    r = requests.delete(f"{DATAVERSE_URL}/api/data/v9.2/{path}",
+                        headers=get_headers())
+    r.raise_for_status()
+    return r
+
+# ── GPT Instructions ─────────────────────────────────────
+
+GPT_INSTRUCTIONS = f"""\
+あなたは「{{エージェント名}}」です。{{エージェントの役割を1〜2文で記述する}}
+
+## 利用可能なテーブル
+
+（テーマで使う Dataverse テーブルを以下の形式で列挙する。下記はフォーマット例であり特定テーマを意図しない）
+
+### {PREFIX}_{{table}}（{{テーブル表示名}}）
+- {PREFIX}_name: テキスト（{{主項目}}）★必須
+- {PREFIX}_{{column}}: テキスト（{{説明}}）
+- {PREFIX}_status: Choice（ステータス）
+  - 100000000 = {{状態1}}
+  - 100000001 = {{状態2}}
+  - 100000002 = {{状態3}}
+- _{PREFIX}_{{lookup}}id_value: Lookup → {PREFIX}_{{related_table}}（{{関連表示名}}）
+- _{PREFIX}_assignedtoid_value: Lookup → systemuser（担当者）
+- createdby: システム列（作成者）
+
+### {PREFIX}_{{related_table}}（{{関連テーブル表示名}}）
+- {PREFIX}_name: テキスト（{{名称}}）
+- {{値一覧があれば列挙する}}
+
+## 行動指針
+
+1. ユーザーの意図を正確に理解し、適切なDataverse操作を実行する
+2. レコード新規作成時は、必須項目を必ず確認してから作成する
+3. 検索結果はテーブル形式で見やすく整形して表示する
+4. 日本語で丁寧かつ簡潔に応答する
+5. Choice値は整数値（100000000等）で指定する
+6. Lookup項目の設定時は対象テーブルからレコードを検索してIDを取得する
+7. 曖昧な指示があった場合は確認を求める
+
+## よくある操作パターン
+
+（テーマに応じた代表的な操作を記述する。例: レコード起票 / 検索 / ステータス更新 / 関連情報照会）
+
+### {{操作名1}}
+{{ヒアリング項目}} → {PREFIX}_{{table}} にレコード作成
+
+### {{操作名2}}
+条件でフィルタして一覧表示
+
+### {{操作名3}}
+対象レコードを特定 → {PREFIX}_status を更新
+"""
+
+# instructions を |- ブロック形式で手動構築（yaml.dump の quoted scalar では UI が認識しない）
+
+# ── 推奨プロンプト（GPT コンポーネントの conversationStarters） ────────
+PREFERRED_PROMPTS = [
+    {"title": "\U0001f4dd {操作1}", "text": "{プロンプト文1}"},
+    {"title": "\U0001f50d {操作2}", "text": "{プロンプト文2}"},
+    {"title": "\U0001f4ca {操作3}", "text": "{プロンプト文3}"},
+    {"title": "\U0001f504 {操作4}", "text": "{プロンプト文4}"},
+]
+
+# conversationStarters は PVA ダブル改行フォーマットで構築（後述の GPT_YAML 内で使用）
+
+# ── 会話の開始のクイック返信（ConversationStart トピックの quickReplies） ──
+QUICK_REPLIES = [
+    "{クイック返信1}",
+    "{クイック返信2}",
+    "{クイック返信3}",
+    "{クイック返信4}",
+]
+
+# ── 会話の開始メッセージ（ConversationStart トピックの挨拶テキスト） ──
+GREETING_MESSAGE = "{挨拶メッセージ。エージェントの役割とできることを簡潔に案内する}"
+
+BOT_DESCRIPTION = "{エージェントの説明。1〜2文で役割を記述する}"
+
+# ── Teams チャネル公開設定 ─────────────────────────────────
+# applicationmanifestinformation.teams に格納される値
+TEAMS_SHORT_DESCRIPTION = "{短い説明（最大80文字）}"  # 最大80文字
+TEAMS_LONG_DESCRIPTION = (
+    "{エージェントの詳細説明。主な機能を箇条書きで記述する（最大3400文字）}"
+)  # 最大3400文字
+TEAMS_ACCENT_COLOR = "#1e293b"  # 背景色（濃紺 — Code Apps と統一）
+TEAMS_DEVELOPER_NAME = "{開発者名}"  # 最大32文字
+TEAMS_WEBSITE = ""  # 空欄ならデフォルト維持
+TEAMS_PRIVACY_URL = ""  # 空欄ならデフォルト維持
+TEAMS_TERMS_URL = ""  # 空欄ならデフォルト維持
+
+# ── アイコン SVG（任意・参考）────
+# 実際のアイコンは generate_icon_png.py で生成し set_icon() で登録する。
+# 下記はテーマに合わせて差し替えるニュートラルなプレースホルダー。
+ICON_SVG = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1e293b"/>
+      <stop offset="100%" style="stop-color:#334155"/>
+    </linearGradient>
+  </defs>
+  <rect width="240" height="240" rx="48" ry="48" fill="url(#bg)"/>
+  <circle cx="120" cy="120" r="56" fill="none" stroke="#e2e8f0" stroke-width="8"/>
+</svg>'''
+
+# ★ PVA パーサーは「ダブル改行（\n\n）区切り」の独自 YAML フォーマットのみ認識する
+# シングル改行の標準 YAML は保存されるが UI に反映されない
+# → 全行をダブル改行で区切り、インデントも PVA の慣例に合わせる
+
+def _build_gpt_yaml() -> str:
+    """PVA 互換の YAML を構築する。
+    構造行（kind, displayName, instructions, conversationStarters 等）はダブル改行。
+    instructions ブロック内のテキストはシングル改行（ |- ブロックスカラー）。"""
+    # instructions ブロック（シングル改行）
+    inst_block = "\n".join(f"  {line}" for line in GPT_INSTRUCTIONS.splitlines())
+
+    # conversationStarters（ダブル改行）
+    starter_lines = []
+    for p in PREFERRED_PROMPTS:
+        starter_lines.append(f"  - title: {p['title']}")
+        starter_lines.append(f"    text: {p['text']}")
+    starters_block = "\n\n".join(starter_lines)
+
+    # 構造行をダブル改行で結合、instructions 内部はシングル改行を維持
+    return (
+        "kind: GptComponentMetadata\n\n"
+        f"displayName: {BOT_NAME}\n\n"
+        f"instructions: |-\n{inst_block}\n\n"
+        f"conversationStarters:\n\n{starters_block}\n\n"
+    )
+
+GPT_YAML = _build_gpt_yaml()
+
+# ── Step 1: Bot 検索 ─────────────────────────────────────
+
+def _extract_bot_id(value: str) -> str | None:
+    """BOT_ID 環境変数から Bot ID を抽出する。URL でも GUID でも対応。"""
+    # GUID パターン
+    match = re.search(r'/bots/([0-9a-f-]{36})', value)
+    if match:
+        return match.group(1)
+    # 直接 GUID が指定されている場合
+    match = re.fullmatch(r'[0-9a-f-]{36}', value.strip())
+    if match:
+        return value.strip()
+    return None
+
+
+# ── Step 1.1: アイコン設定（PNG Base64 → API） ────────
+
+def set_icon(bot_id: str):
+    """PNG アイコンを生成して bots.iconbase64 に PATCH する。
+    Teams チャネル要件:
+      - iconbase64: data: prefix なしの生 Base64 PNG
+      - colorIcon: 192x192 PNG (< 100KB)
+      - outlineIcon: 32x32 PNG (白い透明背景)
+    """
+    print("\n=== Step 1.1: アイコン設定 ===")
+
+    from generate_icon_png import generate_icons
+    icons = generate_icons()
+
+    # iconbase64 は data: prefix なしの生 Base64 PNG（REF エージェントと同じ形式）
+    icon_b64 = icons["main"]["base64"]
+    print(f"  iconbase64: {icons['main']['dimensions']}, {icons['main']['size_bytes']} bytes")
+
+    # ★ bots PATCH には name フィールドが必須
+    bot_info = api_get(f"bots({bot_id})?$select=name")
+    bot_name = bot_info.get("name", BOT_NAME)
+
+    api_patch(f"bots({bot_id})", {"name": bot_name, "iconbase64": icon_b64})
+    print("  ✅ iconbase64 設定完了")
+
+
+def find_bot() -> str:
+    """UI で作成済みの Bot を検索、または BOT_ID 環境変数（URL or GUID）から取得"""
+    print("\n=== Step 1: Bot 検索 ===")
+
+    # 環境変数で指定されていればそれを使う（URL でも GUID でも OK）
+    env_bot_id = os.environ.get("BOT_ID", "")
+    if env_bot_id:
+        bot_id = _extract_bot_id(env_bot_id)
+        if bot_id:
+            print(f"  BOT_ID から自動判別: {bot_id}")
+            return bot_id
+        else:
+            print(f"  ⚠️  BOT_ID の形式が不正: {env_bot_id}")
+            print("  URL または GUID を指定してください")
+            print("  例: BOT_ID=https://copilotstudio.../bots/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx/overview")
+            print("  例: BOT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+            sys.exit(1)
+
+    # schemaname で検索
+    existing = api_get("bots",
+                       {"$filter": f"name eq '{BOT_NAME}'"})
+    if existing.get("value"):
+        bot_id = existing["value"][0]["botid"]
+        print(f"  既存 Bot を発見: {bot_id} ({existing['value'][0].get('name', '')})")
+        return bot_id
+
+    # 見つからない場合
+    print("  ❌ Bot が見つかりません。")
+    print()
+    print("  承認付き provisioning を実行してください:")
+    print(f"    1. python provision_agent.py plan --name '{BOT_NAME}' --schema '{BOT_SCHEMA}' --solution '{SOLUTION_NAME}'")
+    print("    2. plan と表示された SHA-256 をレビュー")
+    print("    3. python provision_agent.py apply --expected-hash <sha256>")
+    print("    4. 出力された Bot ID を BOT_ID に設定して本スクリプトを再実行")
+    print()
+    print("  ※ 観測済み Standard agent contract 以外の bots INSERT は使用しないでください")
+    sys.exit(1)
+
+# ── Step 2: カスタムトピック全削除 ────────────────────────
+
+def _wait_for_provisioning(bot_id: str, timeout: int = 120) -> bool:
+    """Bot のプロビジョニング完了を待つ。トピックが出現するまでリトライ。"""
+    print("\n=== Step 1.5: プロビジョニング待ち ===")
+    elapsed = 0
+    interval = 10
+    while elapsed < timeout:
+        topics = api_get("botcomponents",
+                         {"$filter": f"_parentbotid_value eq '{bot_id}' and componenttype eq 1",
+                          "$select": "botcomponentid"})
+        topic_count = len(topics.get("value", []))
+        if topic_count > 0:
+            print(f"  プロビジョニング完了（トピック {topic_count} 件検出、{elapsed}秒経過）")
+            return True
+        # GPT コンポーネント（componenttype=15）も確認
+        gpt = api_get("botcomponents",
+                      {"$filter": f"_parentbotid_value eq '{bot_id}' and componenttype eq 15",
+                       "$select": "botcomponentid"})
+        if gpt.get("value"):
+            print(f"  プロビジョニング完了（GPT コンポーネント検出、{elapsed}秒経過）")
+            return True
+        print(f"  プロビジョニング待機中... ({elapsed}/{timeout}秒)")
+        time.sleep(interval)
+        elapsed += interval
+    print(f"  ⚠️ {timeout}秒経過 — トピック未検出。プロビジョニングが遅延している可能性があります")
+    print("    Copilot Studio UI で Bot が完全にロードされているか確認してください")
+    return False
+
+
+# 削除から保護するシステムトピックの schemaname パターン
+PROTECTED_TOPIC_PATTERNS = [
+    "ConversationStart",
+    "Escalate",
+    "Fallback",
+    "OnError",
+    "EndofConversation",
+    "MultipleTopicsMatched",
+    "Search",
+    "Signin",
+    "ResetConversation",
+]
+
+
+def delete_custom_topics(bot_id: str):
+    print("\n=== Step 2: カスタムトピック削除 ===")
+    # componenttype=1（カスタムトピック）と componenttype=9（システムトピック含む）の両方を取得
+    topics = api_get("botcomponents",
+                     {"$filter": f"_parentbotid_value eq '{bot_id}' and (componenttype eq 1 or componenttype eq 9)",
+                      "$select": "botcomponentid,name,schemaname,componenttype"})
+    if not topics.get("value"):
+        print("  ⚠️ トピックが 0 件です（プロビジョニング未完了の可能性）")
+    count = 0
+    for topic in topics.get("value", []):
+        name = topic.get("name", "")
+        schema = topic.get("schemaname", "")
+        # システムトピック名はスキップ
+        if name.startswith("system_"):
+            continue
+        # 保護対象のシステムトピックはスキップ（schemaname で判定）
+        if any(p in schema for p in PROTECTED_TOPIC_PATTERNS):
+            print(f"  保護: {name} ({schema})")
+            continue
+        # MCP Server / アクション（.action. を含む）はスキップ
+        if ".action." in schema:
+            print(f"  保護: {name} ({schema})")
+            continue
+        try:
+            api_delete(f"botcomponents({topic['botcomponentid']})")
+            print(f"  削除: {name} ({schema})")
+            count += 1
+        except Exception as e:
+            print(f"  スキップ: {name} ({e})")
+    print(f"  {count} 件のカスタムトピックを削除")
+
+# ── Step 3: 生成オーケストレーション有効化 ────────────────
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """base に override をディープマージ。override 側の値を優先するが、
+    base にしかないキーは保持する。"""
+    result = base.copy()
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def enable_generative_orchestration(bot_id: str) -> dict:
+    """生成オーケストレーションを有効化。既存 configuration をディープマージして返す。
+    ★ 基盤モデル（Claude / GPT 等）の選択は変更しない。"""
+    print("\n=== Step 3: 生成オーケストレーション有効化 ===")
+
+    # 既存 configuration を読み込み（モデル設定・gPTSettings 等を保持するため）
+    bot_data = api_get(f"bots({bot_id})?$select=configuration")
+    existing_config = json.loads(bot_data.get("configuration", "{}") or "{}")
+    print(f"  既存 configuration キー: {list(existing_config.keys())}")
+
+    # aISettings の既存モデル設定を表示（デバッグ用）
+    existing_ai = existing_config.get("aISettings", {})
+    if existing_ai:
+        print(f"  既存 aISettings キー: {list(existing_ai.keys())}")
+
+    # 生成オーケストレーションに必要な最小限の設定のみ指定
+    # ★ optInUseLatestModels は明示的に False — True だと基盤モデルが GPT に強制変更される
+    # ★ aISettings は丸ごと上書きせずディープマージ（既存のモデル選択を保持）
+    overrides = {
+        "$kind": "BotConfiguration",
+        "settings": {
+            "GenerativeActionsEnabled": True,
+        },
+        "aISettings": {
+            "$kind": "AISettings",
+            "useModelKnowledge": True,
+            "isFileAnalysisEnabled": True,
+            "isSemanticSearchEnabled": True,
+            "optInUseLatestModels": False,
+        },
+        "recognizer": {
+            "$kind": "GenerativeAIRecognizer",
+        },
+    }
+
+    # 既存 configuration にオーバーライドをディープマージ
+    # → gPTSettings、モデル選択、その他 UI 由来の設定をすべて保持
+    merged = _deep_merge(existing_config, overrides)
+
+    api_patch(f"bots({bot_id})", {"configuration": json.dumps(merged)})
+    print("  生成オーケストレーション有効化完了（基盤モデル変更なし）")
+    return existing_config
+
+
+# ── Step 4: 指示（Instructions）設定 ──────────────────────
+
+def set_gpt_instructions(bot_id: str, saved_config: dict):
+    print("\n=== Step 4: 指示（Instructions）設定 ===")
+
+    # 保存した configuration から defaultSchemaName を取得
+    default_schema = saved_config.get("gPTSettings", {}).get("defaultSchemaName", "")
+    print(f"  defaultSchemaName: {default_schema or '(なし)'}")
+
+    # 既存 GPT コンポーネント（componenttype=15）をすべて取得
+    existing = api_get("botcomponents",
+                       {"$filter": f"_parentbotid_value eq '{bot_id}' and componenttype eq 15",
+                        "$select": "botcomponentid,name,schemaname,data"})
+    comps = existing.get("value", [])
+    print(f"  既存 GPT コンポーネント数: {len(comps)}")
+
+    # UI が作成したコンポーネント（defaultSchemaName と一致）を探す
+    ui_comp = None
+    extra_comps = []
+    for comp in comps:
+        schema = comp.get("schemaname", "")
+        if default_schema and schema == default_schema:
+            ui_comp = comp
+            print(f"  UI コンポーネント: {schema} ({comp['botcomponentid']})")
+        else:
+            extra_comps.append(comp)
+
+    # UI のコンポーネントがなければ最初のものを使う
+    if ui_comp is None and comps:
+        ui_comp = comps[0]
+        extra_comps = comps[1:]
+        print(f"  フォールバック: {ui_comp.get('schemaname','')} ({ui_comp['botcomponentid']})")
+
+    # 余分なコンポーネントを削除
+    for comp in extra_comps:
+        try:
+            api_delete(f"botcomponents({comp['botcomponentid']})")
+            print(f"  余分なコンポーネント削除: {comp.get('schemaname', comp['botcomponentid'])}")
+        except Exception as e:
+            print(f"  削除スキップ: {comp['botcomponentid']} ({e})")
+
+    # 指示を更新 or 新規作成
+    if ui_comp:
+        comp_id = ui_comp["botcomponentid"]
+
+        # ★ 既存データから aISettings セクションを抽出（モデル選択を保持）
+        # PVA は GPT コンポーネントの data YAML 末尾に aISettings.model.modelNameHint を保存
+        # これを上書きすると基盤モデルがデフォルト（GPT 4.1）に戻ってしまう
+        existing_data = ui_comp.get("data", "")
+        ai_settings_section = ""
+        ai_idx = existing_data.find("\naISettings:")
+        if ai_idx < 0:
+            ai_idx = existing_data.find("aISettings:")
+        if ai_idx >= 0:
+            ai_settings_section = existing_data[ai_idx:].rstrip()
+            print(f"  既存 aISettings を保持: {ai_settings_section[:80]}...")
+
+        # 新しい YAML に既存 aISettings を付加
+        final_yaml = GPT_YAML.rstrip("\n") + "\n\n" + ai_settings_section + "\n\n" if ai_settings_section else GPT_YAML
+
+        api_patch(f"botcomponents({comp_id})", {"data": final_yaml})
+        print(f"  指示コンポーネント更新: {comp_id}")
+    else:
+        schema_name = default_schema or f"{BOT_SCHEMA}.gpt.default"
+        gpt_body = {
+            "name": BOT_NAME,
+            "schemaname": schema_name,
+            "componenttype": 15,
+            "data": GPT_YAML,
+            "parentbotid@odata.bind": f"/bots({bot_id})",
+        }
+        api_post("botcomponents", gpt_body)
+        comp_id = None  # 新規作成の場合は後で取得
+        print(f"  指示コンポーネント新規作成: {schema_name}")
+
+    print("  指示の設定完了")
+    return comp_id
+
+
+# ── Step 4.5: 会話の開始のクイック返信設定 ────────────────
+
+def set_quick_replies(bot_id: str):
+    """ConversationStart トピックの挨拶メッセージと quickReplies を設定する。
+    ★ yaml.dump() 禁止 — PVA パーサーと非互換。全体を手動 YAML 構築。"""
+    print("\n=== Step 4.5: 会話の開始設定（メッセージ + クイック返信） ===")
+
+    # ConversationStart トピックを検索
+    result = api_get("botcomponents", {
+        "$filter": f"_parentbotid_value eq '{bot_id}' and componenttype eq 9 and contains(schemaname,'ConversationStart')",
+        "$select": "botcomponentid,schemaname,data",
+    })
+    topics = result.get("value", [])
+    if not topics:
+        print("  ⚠️ ConversationStart トピックが見つかりません")
+        return
+
+    topic = topics[0]
+    topic_id = topic["botcomponentid"]
+    existing_data = topic.get("data", "")
+    print(f"  トピック: {topic['schemaname']} ({topic_id})")
+
+    # 既存の SendActivity ID を抽出（再利用）
+    id_match = re.search(r'id:\s+(sendMessage_\w+)', existing_data)
+    send_id = id_match.group(1) if id_match else "sendMessage_auto01"
+
+    # ★ PVA ダブル改行フォーマットで ConversationStart YAML を構築
+    # PVA パーサーはシングル改行の YAML を認識しない
+    # 参考エージェントの実際の形式に合わせる:
+    #   - 全行をダブル改行で区切り
+    #   - actions 配下は 4 スペースインデント
+    #   - activity 配下は 8 スペースインデント
+    #   - text/speak リスト項目は 10 スペースインデント
+    #   - quickReplies 項目は 10 スペースインデント
+
+    # 挨拶メッセージ — 改行を含まない 1 行テキスト（PVA は 1 行テキストを想定）
+    greeting_oneline = GREETING_MESSAGE.replace('\n', ' ')
+
+    lines = []
+    lines.append("kind: AdaptiveDialog")
+    lines.append("beginDialog:")
+    lines.append("  kind: OnConversationStart")
+    lines.append("  id: main")
+    lines.append("  actions:")
+    lines.append("    - kind: SendActivity")
+    lines.append(f"      id: {send_id}")
+    lines.append("      activity:")
+    lines.append("        text:")
+    lines.append(f"          - {greeting_oneline}")
+    lines.append("        speak:")
+    lines.append(f'          - "{greeting_oneline}"')
+    lines.append("        quickReplies:")
+    for qr in QUICK_REPLIES:
+        lines.append(f"          - kind: MessageBack")
+        lines.append(f"            text: {qr}")
+
+    # PVA フォーマット: ダブル改行で結合
+    new_data = "\n\n".join(lines) + "\n\n"
+
+    api_patch(f"botcomponents({topic_id})", {"data": new_data})
+    if GREETING_MESSAGE:
+        print(f"  挨拶メッセージ: {GREETING_MESSAGE[:50]}...")
+    print(f"  クイック返信 {len(QUICK_REPLIES)} 件を設定")
+
+
+# ── Step 6: 説明の設定（publish 後に実行）────────────────
+
+def set_description(bot_id: str, comp_id: str | None = None):
+    """UI の「説明」= botcomponents.description カラム。
+    data PATCH の非同期処理で上書きされるため publish 後に設定する。"""
+    print("\n=== Step 6: 説明の設定 ===")
+    if not comp_id:
+        existing = api_get("botcomponents",
+                           {"$filter": f"_parentbotid_value eq '{bot_id}' and componenttype eq 15",
+                            "$select": "botcomponentid"})
+        if existing.get("value"):
+            comp_id = existing["value"][0]["botcomponentid"]
+    if comp_id:
+        api_patch(f"botcomponents({comp_id})", {"description": BOT_DESCRIPTION})
+        print(f"  説明を設定: {BOT_DESCRIPTION[:50]}...")
+    else:
+        print("  ⚠️ GPT コンポーネントが見つかりません")
+
+# ── Step 5: エージェント公開 ──────────────────────────────
+
+def publish_bot(bot_id: str):
+    print("\n=== Step 5: エージェント公開 ===")
+    try:
+        api_post(f"bots({bot_id})/Microsoft.Dynamics.CRM.PvaPublish", {})
+        print("  公開完了")
+    except Exception as e:
+        print(f"  ⚠️ 公開でエラー（手動で公開してください）: {e}")
+
+
+# ── Step 7-8: チャネル公開設定 → set_agent_channels.py に分離 ──
+
+def set_channel_manifest(bot_id: str):
+    """[非推奨] チャネル公開設定は set_agent_channels.py に分離しました。
+    後方互換のため関数は残していますが、main() からは呼び出しません。"""
+    print("\n[deploy_agent] チャネル公開設定は set_agent_channels.py に分離されています。")
+    print("  → python set_agent_channels.py を実行してください。")
+
+
+def publish_to_channels(bot_id: str):
+    """[非推奨] set_agent_channels.py に分離しました。"""
+    print("\n[deploy_agent] チャネル公開実行は set_agent_channels.py に分離されています。")
+
+
+# ── メイン ────────────────────────────────────────────────
+
+def main():
+    print("=" * 60)
+    print("  Copilot Studio エージェント構築")
+    print(f"  エージェント名: {BOT_NAME}")
+    print("=" * 60)
+
+    bot_id = find_bot()
+    _wait_for_provisioning(bot_id)
+    set_icon(bot_id)
+    delete_custom_topics(bot_id)
+    saved_config = enable_generative_orchestration(bot_id)
+    comp_id = set_gpt_instructions(bot_id, saved_config)
+    set_quick_replies(bot_id)
+    publish_bot(bot_id)
+    set_description(bot_id, comp_id)
+
+    print("\n" + "=" * 60)
+    print("  ✅ エージェント構築完了!")
+    print("=" * 60)
+    print()
+    print("  ★ 次のステップ（スクリプトを順に実行）:")
+    print("    2. python set_agent_security.py   … セキュリティ設定（認証）→ 公開")
+    print("       - 認証なし（Web 埋め込み用）: AGENT_AUTH_MODE=none")
+    print("       - Microsoft 認証（Teams 用）: AGENT_AUTH_MODE=microsoft")
+    print("    3. python set_agent_channels.py   … チャネル選択（Web/Teams/Copilot）→ 公開")
+    print()
+    print("  その後（手動操作）: ナレッジ・ツール（MCP Server）を Copilot Studio UI で追加")
+    print()
+
+
+if __name__ == "__main__":
+    main()

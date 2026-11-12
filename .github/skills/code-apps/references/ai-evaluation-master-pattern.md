@@ -1,0 +1,297 @@
+# AI 評価ルールのマスタ化パターン
+
+LLM で自動評価する仕組みを作るとき、**判定基準をコードに埋めると業務側が触れなくなる**。
+評価軸をテーブルに出し、Code App から編集し、変更を過去データにも遡って適用できるようにする構成。
+
+対象例: エージェントの会話ログを「ツール呼び出し精度」「タスク遵守度」などの軸で採点し、
+その根拠と改善提案を画面上でたどれるようにする評価アプリ。
+
+---
+
+## 全体構成
+
+```
+Code App ──編集──> geek_evalrule  （ルール = 判定プロンプト）
+Code App ──依頼──> geek_evaljob   （ジョブ = 再実行の待ち行列）
+                        │
+                  定期実行のパイプライン（PowerShell + Python）
+                        │
+                        ├─ ルールを読む
+                        ├─ 対象ターンを読む
+                        ├─ LLM で (ターン × ルール) を判定
+                        └─ geek_evalresult に upsert
+                        ↓
+Code App <──表示── geek_evalresult（スコア・理由・根拠・改善提案）
+```
+
+**Code App は評価を実行しない。** ブラウザから長時間バッチは回せないので、
+アプリは「依頼を書く」だけにして、実行は外のパイプラインに任せる。
+
+---
+
+## 1. ルールテーブル
+
+| 列 | 型 | 役割 |
+| --- | --- | --- |
+| `name` | String | ルール名（画面表示） |
+| `rulekey` | String | **結果行の主キーの一部。作成後は変更不可にする** |
+| `summary` | Memo | 一覧に出す 1〜2 文 |
+| `prompt` | Memo 32000 | LLM にそのまま渡す判定基準 |
+| `scoreguide` | Memo | 1〜5 の各点の意味 |
+| `target` | Picklist | 応答 / ツール呼び出し / 両方。渡す情報を絞ると判定が安定する |
+| `enabled` | Boolean | 次回の評価で使うか |
+| `sortorder` | WholeNumber | 表示順 |
+| `builtin` | Boolean | 標準ルール。UI 側で削除ボタンを出さない |
+
+**`rulekey` を変更不可にする**のが要点。結果行の名前を `<ターン ID>::<ルールキー>` にして
+upsert の一致キーに使うため、後から変えると過去の結果が孤児になる。
+
+## 2. 結果テーブル
+
+| 列 | 型 | 役割 |
+| --- | --- | --- |
+| `name` | String 300 | `<ターン ID>::<ルールキー>` |
+| `turnname` | String | 評価対象への論理参照（Lookup にしない。後述） |
+| `rulename` | String | 評価時点のルール名のスナップショット |
+| `score` | WholeNumber | 1〜5 |
+| `reason` | Memo | 判定理由（日本語） |
+| `evidence` | Memo 100000 | 根拠 JSON |
+| `suggestions` | Memo 100000 | 改善提案 JSON |
+
+> **Lookup ではなく文字列で紐づける**: 評価対象がまだ Dataverse に無い状態でも結果を書けるようにし、
+> パイプライン側で GUID を引く往復を無くすため。件数が多くない管理系ではこの割り切りが有効。
+
+## 3. JSON 列の形
+
+```jsonc
+// evidence: どこを見てそう判定したか
+[{
+  "kind": "response" | "tool_call" | "query",
+  "quote": "原文の完全一致部分文字列",   // ← 画面ハイライトに使うので言い換え禁止
+  "note": "なぜ根拠なのか",
+  "polarity": "positive" | "negative",
+  "matched": true                        // 原文に見つかったか（後処理で付与）
+}]
+
+// suggestions: 次に何を直すか
+[{
+  "title": "不要なツール呼び出しを抑制する",
+  "target": "skill" | "system_prompt" | "tool" | "other",
+  "detail": "何が問題で、どう変えるか",
+  "example": "そのまま貼れる文面や差分"
+}]
+```
+
+---
+
+## 4. 根拠ハイライトの実装
+
+引用を原文の位置に戻して `<mark>` で囲む。**曖昧一致はしない**（ずれた位置を光らせると誤解を招く）。
+
+```ts
+export function highlightSegments(text: string, evidence: Evidence[]): Segment[] {
+  if (!text) return []
+
+  const ranges: { start: number; end: number; evidence: Evidence }[] = []
+  for (const item of evidence) {
+    const quote = item.quote?.trim()
+    if (!quote || item.matched === false) continue
+    const start = text.indexOf(quote)
+    if (start < 0) continue
+    ranges.push({ start, end: start + quote.length, evidence: item })
+  }
+  ranges.sort((a, b) => a.start - b.start || b.end - a.end)
+
+  const segments: Segment[] = []
+  let cursor = 0
+  for (const range of ranges) {
+    if (range.start < cursor) continue          // 入れ子のハイライトは読みにくいので捨てる
+    if (range.start > cursor) segments.push({ text: text.slice(cursor, range.start) })
+    segments.push({ text: text.slice(range.start, range.end), evidence: range.evidence })
+    cursor = range.end
+  }
+  if (cursor < text.length) segments.push({ text: text.slice(cursor) })
+  return segments
+}
+```
+
+### 落とし穴
+
+| 症状 | 原因 | 対処 |
+| --- | --- | --- |
+| ハイライトが 1 つも出ない | 本文を Markdown で描画している。整形後の DOM と原文で位置がずれる | ハイライト表示中だけ素のテキストにフォールバックする |
+| 引用が原文に見つからない | LLM が要約・言い換えをした | プロンプトで「1 文以内・60 文字程度」に制限する。実測で一致率 74% → 82% |
+| 一致しなかった引用が消える | 落とすと根拠自体が見えなくなる | `matched: false` を付けて残し、一覧側には文章として表示する |
+| ツール呼び出しに色が付かない | 判定側は整形済み JSON を見て、UI 側は `JSON.stringify(call)` で照合していた | 詰めた形と整形した形の両方で照合し、ツール名の部分一致もフォールバックにする |
+
+## 5. ジョブ行キュー（アプリからバッチを起こす）
+
+HTTP エンドポイントも Power Automate も足さずに済む最小構成。
+
+- アプリ: `status = 待機中` の行を作るだけ。**状態遷移はアプリ側でやらない**
+- パイプライン: 起動時に最古の待機中を 1 件拾い、`実行中` → `完了 / 失敗` と進める
+- 進捗は `targetcount` / `donecount` に書き、アプリは開いている間だけポーリングする
+
+```powershell
+$job = @(Get-All "geek_evaljobs?`$filter=geek_status eq 1&`$orderby=geek_requestedon asc") | Select-Object -First 1
+```
+
+> `(...)[0]` は 0 件のとき「Cannot index into a null array.」で落ちる。`@(...) | Select-Object -First 1` にする。
+
+スコープは「未評価のみ / 全件 / 期間指定」の 3 つで足りる。
+既存結果のキー一覧を先に引いて skip セットにし、`(ターン × ルール)` 単位で飛ばすと、
+ルールを 1 本足したときに**その 1 本だけ**が課金対象になる。
+
+### 5.1 積む側だけ作っても動かない
+
+「アプリから再実行できます」と言えるのは、**キューを消化する常駐側とセットで出したときだけ**。
+積む UI を先に出すと、待機中の行だけが溜まり「実行履歴が更新されない」という報告になる。
+
+- 消化側は**常時起動しているホスト**に置く（App Service なら `BackgroundService` + Always On）
+- 開発者のPCのタスクスケジューラは検証用。ユーザーの「再実行」ボタンの受け皿にはしない
+- **Free / Consumption 系プランには置かない。** Always On が無いプランはアイドルでプロセスが
+  アンロードされ、走行中のジョブごと消える
+
+**実測で一番安く済んだのは Power Automate のクラウドフロー**（検証済 2026-08-13）。
+Dataverse の「行が追加された場合」トリガーでキュー行を拾い、判定は Azure OpenAI を
+カスタムコネクター経由で呼ぶ。常駐ホストもストレージアカウントも要らない。
+
+> テナントによっては**ストレージアカウントの公開アクセスが一律で禁止**されていることがある。
+> その場合 Azure Functions は VNet と Private Endpoint が必須になり、
+> App Service を 1 段上げるより高くつく。安いつもりで選ぶと逆になる。
+
+構築手順と落とし穴は `power-automate` スキルの
+`references/trigger-action-patterns.md` と `references/troubleshooting.md` を参照。
+
+### 5.2 実行中のまま孤児になったジョブを回収する
+
+プロセスが落ちると、そのジョブは誰も触らないまま `実行中` で残り続ける。
+待機中しか拾わない実装だと**永久に復旧しない**ので、拾う前に回収する。
+
+- 進捗更新のたびに行の `modifiedon` が動くので、これをハートビートとして使う
+- `status eq 実行中 and modifiedon lt (now - N分)` を待機中へ戻す（N は既定 15 分程度）
+- 未評価スキップが効くので、積み直しても済んだ分は再課金されない
+
+判定用モデルは `mini` 系で十分。全件再評価が現実的なコストに収まるかどうかがここで決まる。
+
+## 6. 旧列へのミラー
+
+指標を後からルール化した場合、既存の一覧・グラフが参照している列を壊さない。
+
+```powershell
+$mirror = @{
+    "tool_call_accuracy" = @{ Score = "geek_toolcallaccuracy"; Reason = "geek_toolcallaccuracyreason" }
+    "task_adherence"     = @{ Score = "geek_taskadherence";    Reason = "geek_taskadherencereason" }
+}
+```
+
+結果を書いたあと、対応するルールだけ親レコードにも書き戻す。画面側の移行を別のタイミングにできる。
+
+## 7. 会話単位で評価する（複数ターンの統合）
+
+エージェントは 1 応答＝1 行で記録するが、実際の依頼は**数往復かけて果たされる**ことが多い。
+1 往復だけを見ると「タスク遵守度」が不当に低く出るため、続けて交わされたターンを
+**1 つの評価ターンにまとめて**採点できるようにする。
+
+### 列
+
+| 列 | 型 | 役割 |
+| --- | --- | --- |
+| `mergedinto` | String 200 | 統合先の行 ID。**値がある行は一覧・グラフ・採点から外す** |
+| `mergedfrom` | Memo | 統合元の行 ID の JSON 配列 |
+| `turncount` | WholeNumber | 束ねた往復数（通常行は空） |
+| `conversation` | Memo 100000 | 往復の構造化 JSON（画面表示用） |
+
+列を足したら**発行する**。既存テーブルへの追加では自動で発行されないため、
+`PublishAllXml` を呼ばないと `Could not find a property named 'geek_conversation'` で読み取りが落ちる
+（→ [トラブルシューティング #39](troubleshooting.md)）。
+
+### 元の行は消さずに「隠す」
+
+削除すると監査もやり直しもできない。統合先を指させ、既定のクエリから外すだけにする。
+
+```ts
+// 一覧・ダッシュボード・グラフが共通で使う一覧関数に条件を埋める。画面ごとに書くと必ず漏れる
+if (!includeMerged) clauses.push(`${F.mergedInto} eq null`)
+```
+
+**同じ条件をパイプライン側にも入れる。** 入れ忘れると統合元が採点され続け、
+判定モデルの課金が二重になり、統合先と食い違うスコアが残る。
+
+```powershell
+$turnFilter = "geek_query ne null and geek_mergedinto eq null"
+```
+
+### 判定器に渡す形と、画面に出す形を分ける
+
+判定器が読むのは `query` / `response` / `toolcalls` の 3 列だけ。パイプラインを触らずに済むよう、
+統合行では**往復を平坦化して同じ 3 列に書く**。画面用の構造は別列に持つ。
+
+```ts
+// 判定器向け: 【N 回目】で区切って連結する。引用ハイライトもこの平坦化後の本文に対して当たる
+query:    entries.map((e, i) => `【${i + 1} 回目】\n${e.query}`).join("\n\n")
+response: entries.map((e, i) => `【${i + 1} 回目】\n${e.response}`).join("\n\n")
+toolcalls: entries.flatMap((e) => e.toolCalls)   // 呼ばれた順序を保つ
+conversation: JSON.stringify(entries)            // 画面はこちらを往復ごとに描く
+```
+
+> **Memo の上限を超えると保存が丸ごと失敗する**（部分保存にはならない）。
+> 連結後に列ごとの上限で切り詰め、末尾に省略した旨を残す。
+
+### 候補は自動提案する
+
+手で選ばせると使われない。**同じ相手・同じ経路・一定時間内に連続**したターンを候補として並べ、
+外したいものだけチェックを外して統合させる。間隔は既定 30 分、15 / 30 / 60 / 180 分から選べるようにする。
+入れ子を避けるため、**すでに統合した行と統合結果そのものは候補から除く**。
+
+### 統合したら未評価にする
+
+統合行にスコアを書かない（＝未評価）ままにすれば、「未評価のみ」のジョブが次の実行で拾う。
+統合のたびにジョブを積むと待ち行列が膨れるので、**待機中のジョブがあるときは積まない**。
+
+### 解除できるようにする
+
+`mergedinto` を消して統合行を削除すれば元に戻る。ただし**統合行に紐づいた評価結果は失われる**
+（結果は行 ID で紐づくため）。確認ダイアログにその 1 文を必ず書く。
+
+---
+
+## パイプライン側の落とし穴
+
+| 症状 | 原因 | 対処 |
+| --- | --- | --- |
+| upsert が毎回 INSERT になり行が倍々に増える | キーに `+` が含まれ（ISO8601 のタイムゾーン `+00:00` など）、クエリ文字列上で空白として解釈される | `[uri]::EscapeDataString()` で **リテラルだけ**を URL エンコードしてから `$filter` に埋める |
+| `ConvertTo-Json -AsArray` が使えない | PowerShell 7 専用。タスクスケジューラが Windows PowerShell にフォールバックすると落ちる | `@(...)` で包んで出力し、先頭が `[` でなければ自前で括る |
+| テーブル作成直後の `EntityDefinitions` 取得が `0x80060888 Error in query syntax` | メタデータキャッシュが未更新。404 ではなく構文エラーとして返る | 3 秒間隔で 10 回程度リトライする |
+| 日本語が化けて保存される | `ContentType` に charset が無い | `"application/json; charset=utf-8"` を明示する |
+| BOM が先頭のキーにくっつく | Windows PowerShell の `-Encoding utf8` は BOM 付き | Python 側で `encoding="utf-8-sig"` で読む |
+
+## LLM 呼び出し
+
+- **構造化出力（`response_format` の `json_schema` + `strict`）を使う**。自由記述をパースすると必ず壊れる
+- `strict: true` は全プロパティを `required` に入れ、`additionalProperties: false` を付ける必要がある
+- 推論モデルは `max_tokens` を拒否するライブラリがある。判定用途は `gpt-4.1` 系で足りる
+- ローカル認証を無効化したリソースでは `azure_ad_token_provider` を使う
+
+```python
+client = AzureOpenAI(
+    azure_endpoint=ENDPOINT,
+    azure_ad_token_provider=get_bearer_token_provider(
+        DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default"
+    ),
+    api_version="2024-10-21",   # json_schema は 2024-08-01 以降
+)
+```
+
+- 結果は **1 行 1 JSON（JSONL）で逐次 flush** する。途中で落ちてもそこまでの判定が残る
+- 1 件の失敗で全体を止めない。失敗件数だけ集計して続行する
+
+## 画面側チェックリスト
+
+- [ ] 判定理由・根拠・改善提案がすべて日本語で出るか
+- [ ] ルール名から編集画面へ遷移できるか（`rulekey` → ルールの GUID を引く）
+- [ ] カードを選ぶと本文・ツール呼び出しの該当箇所が色付くか
+- [ ] 改善提案に「何を」「どう変えるか」「貼れる例」の 3 つが揃っているか
+- [ ] ルールを保存しただけでは過去データが変わらないことを画面で説明しているか
+- [ ] 旧ルールで評価された行にもフォールバック表示があるか
+- [ ] 統合した会話が往復ごとに読めるか。一覧・グラフから統合元が消えているか

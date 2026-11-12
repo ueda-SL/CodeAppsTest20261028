@@ -1,0 +1,548 @@
+# Copilot Studio エージェント構築リファレンス
+
+## 構築手順
+
+### Step 0: 承認付き private API で Bot をプロビジョニング
+
+Standard agent 作成画面で観測した `POST /api/data/v9.2/bots?$select=botid` のcontractを使う。
+単純な`bots` INSERTではなく、`template=default-2.1.0`と完全な`BotConfiguration`がprovisioning triggerになる。
+実行前にplanとSHA-256をレビューし、承認したhashをapplyへ渡す。
+
+```powershell
+python scripts/provision_agent.py plan `
+    --name "{エージェント表示名}" `
+    --schema "{prefix}_{BotSchema}" `
+    --language 1041 `
+    --solution "{SolutionUniqueName}"
+
+python scripts/provision_agent.py apply `
+    --plan .mcp/copilot-studio-v1-agent-plan.json `
+    --expected-hash {表示されたSHA-256}
+```
+
+planは`.mcp/`へ保存しGitへ含めない。applyは次を送信前に検証する。
+
+- contract、method、Dataverse endpoint、固定template/認証値が観測値と一致する
+- planのoriginが実行時`DATAVERSE_URL`と一致する
+- agent schemaが未使用である
+- icon bytesが承認済みhash/sizeと一致する
+- 作成後にcomponenttype `9`（topic）と`15`（GPT）が両方出現する
+
+**⚠️ プロビジョニング完了を待つこと（重要）**
+
+Bot を「作成」した直後は Dataverse に `bots` レコードが即座に作成されるが、
+**デフォルトトピック・GPT コンポーネント等は PVA Bot Management Service が非同期でプロビジョニング**する。
+Bot ID URL をコピーしてすぐにスクリプトを実行すると、カスタムトピック削除が 0 件になる。
+
+正常系:
+
+```
+1. `plan`を生成し、name/schema/language/solution/originとSHA-256を承認
+2. 同じhashで`apply`を実行
+3. 出力されたBot IDを`.env`の`BOT_ID`へ設定
+4. `python ./deploy_agent.py`を実行
+```
+
+### Step 1: Bot 検索
+
+- `.env` の `BOT_ID` から取得（URL でも GUID でも可）
+- URL の場合: `/bots/([0-9a-f-]{36})` で抽出
+- なければ `bots` テーブルを `name` で検索
+
+### Step 1.5: プロビジョニング完了待ち（スクリプト内で自動）
+
+Bot の Dataverse レコードは即座に作成されるが、デフォルトトピック・GPT コンポーネントは
+PVA Bot Management Service が**非同期でプロビジョニング**する。
+スクリプトは自動的にポーリングして完了を待つ。
+
+```python
+def wait_for_provisioning(bot_id: str, timeout: int = 120) -> bool:
+    """トピックまたは GPT コンポーネントが出現するまでポーリング"""
+    elapsed = 0
+    while elapsed < timeout:
+        # componenttype=1 (トピック) をチェック
+        topics = api_get("botcomponents", {
+            "$filter": f"_parentbotid_value eq '{bot_id}' and componenttype eq 1",
+            "$select": "botcomponentid"})
+        if topics.get("value"):
+            return True
+        # componenttype=15 (GPT コンポーネント) もチェック
+        gpt = api_get("botcomponents", {
+            "$filter": f"_parentbotid_value eq '{bot_id}' and componenttype eq 15",
+            "$select": "botcomponentid"})
+        if gpt.get("value"):
+            return True
+        print(f"  待機中... ({elapsed}/{timeout}秒)")
+        time.sleep(10)
+        elapsed += 10
+    print(f"  ⚠️ {timeout}秒タイムアウト")
+    return False
+```
+
+```
+✅ 10 秒間隔でポーリング、最大 120 秒タイムアウト
+✅ componenttype=1 (トピック) と componenttype=15 (GPT) の両方をチェック
+✅ タイムアウトしても警告のみ（致命的エラーにしない — UI でまだ作成中の可能性）
+❌ プロビジョニング完了前にトピック削除 → 0 件削除で既定トピックが残る
+❌ time.sleep() で固定時間待機 → プロビジョニングが遅い環境で不足する
+```
+
+### Step 2: カスタムトピック削除（システムトピック保護）
+
+**削除対象**: ユーザー作成のカスタムトピック（あいさつ、ありがとう、お問い合わせありがとう、最初からやり直す等）
+**保護対象**: システムトピック（ConversationStart, Escalate, Fallback, OnError, Search, Signin 等）と MCP Server アクション
+
+```python
+# 保護対象の schemaname パターン
+PROTECTED_TOPIC_PATTERNS = [
+    "ConversationStart", "Escalate", "Fallback", "OnError",
+    "EndofConversation", "MultipleTopicsMatched", "Search",
+    "Signin", "ResetConversation", "StartOver",
+]
+
+# componenttype=1 と 9 の両方を取得
+topics = api_get("botcomponents",
+    {"$filter": f"_parentbotid_value eq '{bot_id}' and (componenttype eq 1 or componenttype eq 9)",
+     "$select": "botcomponentid,name,schemaname,componenttype"})
+for topic in topics["value"]:
+    schema = topic.get("schemaname", "")
+    # システムトピック・アクションは保護
+    if any(p in schema for p in PROTECTED_TOPIC_PATTERNS):
+        continue
+    if ".action." in schema:
+        continue
+    api_delete(f"botcomponents({topic['botcomponentid']})")
+```
+
+```
+❌ system_ プレフィックスだけで判定 → ConversationStart 等が削除されるリスク
+❌ componenttype=1 だけを対象 → プロビジョニング時のトピックタイプが変わる可能性
+✅ schemaname パターンでシステムトピックを明示的に保護
+✅ .action. を含む MCP Server アクションも保護
+```
+
+### Step 3: 生成オーケストレーション有効化
+
+**⚠️ 基盤モデル（Claude / GPT 等）を変更しないこと（重要）**
+
+```python
+# 既存 configuration を読み込み → ディープマージで既存設定を保持
+bot_data = api_get(f"bots({bot_id})?$select=configuration")
+existing_config = json.loads(bot_data.get("configuration", "{}") or "{}")
+
+# ★ 必要最小限のオーバーライドのみ指定
+overrides = {
+    "$kind": "BotConfiguration",
+    "settings": {"GenerativeActionsEnabled": True},
+    "aISettings": {
+        "$kind": "AISettings",
+        "useModelKnowledge": True,
+        "isFileAnalysisEnabled": True,
+        "isSemanticSearchEnabled": True,
+        "optInUseLatestModels": False,  # ★ 明示的に False — True だと基盤モデルが GPT に強制変更される
+    },
+    "recognizer": {"$kind": "GenerativeAIRecognizer"},
+}
+
+# ★ ディープマージ: 既存の gPTSettings・モデル選択・その他 UI 設定を全て保持
+merged = _deep_merge(existing_config, overrides)
+
+api_patch(f"bots({bot_id})", {"configuration": json.dumps(merged)})
+```
+
+```
+❌ optInUseLatestModels: True → UI で選択した基盤モデル（Claude 等）が GPT に強制変更される
+❌ aISettings を丸ごと上書き → モデル設定が消える
+❌ gPTSettings だけ保持して他の既存キーを落とす → 設定が欠損
+✅ ディープマージで既存 configuration を保持し、必要な設定のみ追加・更新
+✅ optInUseLatestModels は明示的に False — UI で選択した基盤モデルを維持
+✅ 既存 config に True が残っていても False で上書きする
+```
+
+### Step 4: 指示（Instructions）設定
+
+```python
+# UI コンポーネント特定 → defaultSchemaName で照合
+default_schema = saved_config.get("gPTSettings", {}).get("defaultSchemaName", "")
+
+existing = api_get("botcomponents",
+    {"$filter": f"_parentbotid_value eq '{bot_id}' and componenttype eq 15",
+     "$select": "botcomponentid,name,schemaname,data"})
+
+# defaultSchemaName と一致 → UI コンポーネント、それ以外 → 削除対象
+# フォールバック: defaultSchemaName がなければ最初のものを使う
+# 更新: api_patch("botcomponents(comp_id)", {"data": GPT_YAML})
+```
+
+### Step 4.5: 会話の開始設定（メッセージ + クイック返信）
+
+**⚠️ yaml.dump() / yaml.safe_load() → yaml.dump() のパイプラインは使用禁止【必須】**
+
+```
+❌ yaml.safe_load() → 値を変更 → yaml.dump() で書き戻す
+   → yaml.dump() が PVA パーサーと非互換な YAML を出力する
+   → 改行入り文字列が single-quoted multiline になり UI が認識しない
+   → quickReplies が消える / 会話の開始メッセージが空になる
+
+✅ ConversationStart YAML は全体を手動で文字列構築する
+   → 既存の SendActivity ID のみ正規表現で抽出して再利用
+   → YAML テンプレートに変数を埋め込んで生成
+```
+
+```python
+import re
+
+# ConversationStart トピック（componenttype=9）を検索
+result = api_get("botcomponents", {
+    "$filter": f"_parentbotid_value eq '{bot_id}' and componenttype eq 9 and contains(schemaname,'ConversationStart')",
+    "$select": "botcomponentid,schemaname,data",
+})
+topic = result["value"][0]
+topic_id = topic["botcomponentid"]
+existing_data = topic.get("data", "")
+
+# 既存の SendActivity ID を抽出（再利用）
+id_match = re.search(r'id:\s+(sendMessage_\w+)', existing_data)
+send_id = id_match.group(1) if id_match else "sendMessage_fix01"
+
+# ★ YAML を手動で全体構築（yaml.dump() 禁止）
+new_data = f'''kind: AdaptiveDialog
+beginDialog:
+  kind: OnConversationStart
+  id: main
+  actions:
+  - kind: SendActivity
+    id: {send_id}
+    activity:
+      text:
+      - "{GREETING_MESSAGE}"
+      speak:
+      - "{GREETING_MESSAGE}"
+      quickReplies:
+      - kind: MessageBack
+        text: クイック返信テキスト1
+      - kind: MessageBack
+        text: クイック返信テキスト2
+'''
+
+api_patch(f"botcomponents({topic_id})", {"data": new_data})
+```
+
+> **挨拶メッセージ**: 設計時にエージェントの目的に合ったテキストを提案する。
+> 例: 「こんにちは！{エージェント名}です。お気軽にお申し付けください。」
+
+### Step 5: エージェント公開（構築の反映）
+
+`deploy_agent.py` の最後に実行。構築（トピック・Instructions・会話の開始）を反映する。
+
+```python
+api_post(f"bots({bot_id})/Microsoft.Dynamics.CRM.PvaPublish", {})
+```
+
+### Step 6: 説明の設定（publish 後）
+
+```python
+# data PATCH の非同期処理が description を上書きするため publish 後に設定
+api_patch(f"botcomponents({comp_id})", {"description": description_text})
+```
+
+---
+
+> **⚠️ Step 7 以降は「公開」処理を 3 スクリプトに分離する【必須】**
+>
+> 「セキュリティ設定 → 公開 → チャネル選択 → 公開」を 1 本のスクリプトに一体化しないこと。
+> 一体化すると認証モードを設定し忘れたまま公開され、UI 既定の **Microsoft 認証** で公開されてしまう
+> （Web 埋め込みができない）。以下の 3 スクリプトに分離する:
+>
+> | スクリプト | 役割 |
+> |---|---|
+> | `deploy_agent.py` | 構築（Step 1–6）＋ 構築の公開 |
+> | `set_agent_security.py` | **Step 7: セキュリティ（認証モード）設定 → 公開** |
+> | `set_agent_channels.py` | **Step 8: チャネル選択（Web/Teams/Copilot）→ 公開** |
+>
+> 実行順: `deploy_agent.py` → `set_agent_security.py` → `set_agent_channels.py`
+
+### Step 7: セキュリティ（ユーザー認証）設定 → 公開【`set_agent_security.py`】
+
+Copilot Studio の「設定 → セキュリティ → 認証」に相当。**認証変更は公開後に反映される**。
+
+```python
+# AGENT_AUTH_MODE=none | microsoft（.env で指定、未設定時は none）
+AUTH_MODE_VALUES = {"microsoft": 2, "none": 1}   # Copilot Studio v1 の bots.authenticationmode
+
+value = AUTH_MODE_VALUES[mode]
+bot = api_get(f"bots({bot_id})?$select=name,authenticationmode")
+body = {"name": bot["name"], "authenticationmode": value}
+if mode == "microsoft":
+    body["authenticationtrigger"] = 0
+api_patch(f"bots({bot_id})", body)
+
+# ★ PATCH 後に保存値を再取得し、誤った対応表や更新失敗を検出する
+updated_bot = api_get(f"bots({bot_id})?$select=authenticationmode")
+if updated_bot.get("authenticationmode") != value:
+    raise RuntimeError("認証モードの保存値が期待値と一致しません")
+
+# ★ 認証変更は公開後に反映される
+api_post(f"bots({bot_id})/Microsoft.Dynamics.CRM.PvaPublish", {})
+```
+
+**Copilot Studio v1 の `bots.authenticationmode` の値（実機 live 環境で確認済み）:**
+
+| UI の選択肢 | `authenticationmode` | 用途 |
+|---|---|---|
+| 認証なし（No authentication） | `1` | **Web 埋め込み（匿名アクセス）に必須** |
+| Microsoft で認証（Authenticate with Microsoft） | `2` | **UI 既定**。Teams + M365 チャネル |
+| 手動で認証（Authenticate manually） | （OAuth 設定が別途必要・本スクリプト対象外） | カスタム OAuth |
+
+```
+❌ `authenticationmode=1` を Microsoft 認証として設定する → 実際には認証なしで公開される
+❌ 認証モードを設定しない → UI 既定の Microsoft 認証（=2）で公開され Web 埋め込み不可
+❌ authenticationmode を設定したが公開しない → 変更が反映されない
+✅ 認証なしの Web 埋め込みが必要なら AGENT_AUTH_MODE=none を明示 → PATCH → 公開
+✅ bots PATCH には name 必須（省略すると "Empty or null bot name" エラー）
+```
+
+### Step 8: チャネル選択（Web / Teams / Copilot）→ 公開【`set_agent_channels.py`】
+
+`AGENT_CHANNELS=web,teams,copilot`（カンマ区切り）で対象チャネルを選択する。
+
+```python
+# web     … Web / カスタムアプリ（DirectLine）。公開すれば既定で利用可能（追加設定不要）
+# teams   … Teams マニフェスト（applicationmanifestinformation.teams）+ msteams チャネル
+# copilot … copilotChat.isEnabled=True + Microsoft365Copilot チャネル
+
+# --- teams を選択した場合: Teams マニフェスト ---
+bot_data = api_get(f"bots({bot_id})?$select=applicationmanifestinformation,iconbase64")
+existing_ami = json.loads(bot_data.get("applicationmanifestinformation", "{}") or "{}")
+existing_teams = existing_ami.get("teams", {})
+existing_teams["shortDescription"] = "簡単な説明（最大80文字）"
+existing_teams["longDescription"] = "詳細な説明（最大3400文字）"
+existing_teams["accentColor"] = "#0078D4"
+existing_teams["developerName"] = "開発者名（最大32文字）"
+existing_teams["colorIcon"] = icon_192_b64   # 192x192 PNG（生 Base64）
+existing_teams["outlineIcon"] = icon_32_b64  # 32x32 PNG（生 Base64）
+existing_ami["teams"] = existing_teams
+
+# --- copilot を選択した場合: M365 Copilot 可用性 ---
+existing_ami["copilotChat"] = {"isEnabled": True}
+api_patch(f"bots({bot_id})", {"name": bot_name, "applicationmanifestinformation": json.dumps(existing_ami)})
+
+# --- configuration.channels に選択したチャネルを追加 ---
+config = json.loads(bot_data2.get("configuration", "{}") or "{}")
+channels = config.get("channels", [])
+# teams → {"channelId": "msteams", ...}、copilot → {"channelId": "Microsoft365Copilot", ...}
+config["channels"] = channels
+api_patch(f"bots({bot_id})", {"configuration": json.dumps(config)})
+
+# 最終公開
+api_post(f"bots({bot_id})/Microsoft.Dynamics.CRM.PvaPublish", {})
+```
+
+```
+アイコン画像の要件（Teams チャネル）:
+- PNG 形式必須（Teams チャネルが SVG を受け付けない）
+- 3 サイズ生成: 240x240（iconbase64）、192x192（colorIcon）、32x32（outlineIcon）
+- `data:` prefix なしの生 Base64 PNG で API 登録
+
+Teams マニフェスト設定項目:
+| 項目 | 最大文字数 | デフォルト |
+|------|-----------|-----------|
+| 簡単な説明 | 80 | Microsoft Copilot Studio を使用して構築します。 |
+| 詳細な説明 | 3400 | （デフォルトは汎用テキスト） |
+| 開発者名 | 32 | 自分の開発者名 |
+| 背景色 | - | #FFFFFF（白/透明推奨） |
+| Web サイト | - | go.microsoft.com/fwlink/?linkid=2138949 |
+| プライバシー | - | go.microsoft.com/fwlink/?linkid=2138950 |
+| 使用条件 | - | go.microsoft.com/fwlink/?linkid=2138865 |
+| M365 Copilot | - | copilotChat.isEnabled = true |
+```
+
+```
+⚠️ Teams / Copilot チャネルは「Microsoft で認証」（authenticationmode=2）が前提。
+    認証なし（=1）のまま teams/copilot を選ぶと利用できないため、set_agent_channels.py は
+    authenticationmode=1 のとき警告を表示する。
+✅ Web 埋め込み（認証なし）なら AGENT_CHANNELS=web のみで OK（追加のチャネル定義は不要）
+```
+
+### Step 9: MCP toolの承認付き追加と残りのUI設定
+
+```
+✅ Standard MCP toolはUIのfresh requestを承認付きで通過させ、componenttype 9をread-backする
+⚠️ connector tool・ナレッジ・トリガーにMCP contractを流用しない。各UI requestの実測が必要
+```
+
+MCPの正常系は[Standard agent MCP tool provisioning](standard-mcp-tools.md)を使う。
+接続がなければ接続作成標準に従い、OAuthのアカウント選択・MFA・同意だけをユーザーが行う。
+
+**ユーザーに提示するテンプレート:**
+
+```markdown
+### Copilot Studio UI での手動設定
+
+#### ナレッジの追加
+
+1. Copilot Studio → エージェントを開く
+2. 左メニュー「ナレッジ」→「+ ナレッジの追加」
+3. データソースを選択（Dataverse テーブル / SharePoint サイト / ファイル等）
+4. 対象を設定して保存
+
+#### MCP以外のツールの追加
+
+1. 左メニュー「ツール」→「+ ツールの追加」
+2. コネクタまたは MCP Server を検索して選択
+   - 例: Dataverse（CRUD 操作）、Work IQ Word MCP（Word 操作）、Work IQ Mail MCP（メール送受信）等
+3. 使用するアクションを有効化して保存
+
+> **⚠️ コネクタツール vs MCP ツールの選択基準**
+>
+> | 操作           | 推奨ツール                             | 理由                                                                                                                           |
+> | -------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+> | メール返信     | **Work IQ Mail MCP** (`mcp_MailTools`) | 「メールに返信する (V3)」コネクタは Attachments が AutomaticTaskInput として定義され、エージェントが値を解決できずスタックする |
+> | Word 操作      | Work IQ Word MCP (`mcp_WordServer`)    | シンプルな MCP インターフェース                                                                                                |
+> | Dataverse CRUD | Dataverse コネクタ                     | 検索・更新・作成に安定                                                                                                         |
+>
+> **原則: MCP 版がある操作は MCP を優先する。コネクタツールの AutomaticTaskInput が原因でスタックするリスクを回避できる。**
+
+#### トリガーの追加（外部トリガーがある場合）
+
+1. 左メニュー「トリガー」→「+ トリガーの追加」
+2. トリガー一覧から使用するトリガーを選択し「次へ」をクリック
+3. 作成済みのフローが表示されるので選択
+4. 「トリガーの保存」をクリック
+
+##### 選択可能なトリガー一覧（「おすすめ」タブ）
+
+| トリガー名                                 | コネクタ              |
+| ------------------------------------------ | --------------------- |
+| Recurrence                                 | Schedule              |
+| 新しい応答が送信されるとき                 | Microsoft Forms       |
+| 項目が作成されたとき                       | SharePoint            |
+| アイテムが作成または変更されたとき         | SharePoint            |
+| ファイルが作成されたとき                   | OneDrive for Business |
+| チャネルに新しいメッセージが追加されたとき | Microsoft Teams       |
+| 行が追加、変更、または削除された場合       | Microsoft Dataverse   |
+| 新しいメールが届いたとき (V3)              | Office 365 Outlook    |
+| タスクが完了したとき                       | Planner               |
+| アイテムまたはファイルが修正されたとき     | SharePoint            |
+| ファイルが作成されたとき (プロパティのみ)  | SharePoint            |
+
+> 「すべて」タブで全コネクタを検索可能。
+
+#### 公開
+
+1. 上記の設定完了後、右上の「公開」ボタンをクリック
+
+#### 接続マネージャーで接続を作成（公開後・実行前）
+
+エージェントを実行する前に、接続マネージャーで全ツールの接続を作成・認証する必要がある。
+```
+
+接続マネージャー URL:
+https://copilotstudio.microsoft.com/c2/tenants/{TENANT_ID}/environments/{ENV_ID}/bots/{BOT_SCHEMA}/channels/pva-studio/user-connections
+
+```
+
+- `{TENANT_ID}`: .env の `TENANT_ID`
+- `{ENV_ID}`: 環境 ID（`RetrieveCurrentOrganization` API で取得可能）
+- `{BOT_SCHEMA}`: エージェントのスキーマ名（例: `geek_newsreporter`）
+
+> **デプロイスクリプトが接続マネージャー URL を自動生成して表示する。**
+> 未認証の接続があるとエージェントがツールを呼び出せず、処理が途中で止まる。
+```
+
+## Instructions テンプレート
+
+### Dataverse テーブル論理名は単数形【必須】
+
+Instructions 内で Dataverse テーブル名を指定するとき、**必ず単数形の論理名**（`LogicalName`）を使うこと。
+Power Apps MCP Server・Dataverse MCP Server はテーブルの論理名（単数形）でアクセスする。
+複数形（`EntitySetName`）や表示名では正しくアクセスできない。
+
+```
+❌ geek_market_insights   ← 複数形（EntitySetName）
+❌ 市場インサイト          ← 表示名
+✅ geek_market_insight    ← 単数形（LogicalName）
+```
+
+> **教訓**: Instructions に複数形テーブル名を記載すると、
+> エージェントが MCP Server 経由で Dataverse にアクセスする際にテーブルが見つからずエラーになる。
+
+```
+あなたは「{エージェント名}」です。{目的の説明}。
+
+## 利用可能なテーブル
+
+### {prefix}_tablename（日本語名）
+- {prefix}_column: 型（説明）
+- {prefix}_status: Choice（ステータス）
+  - 100000000 = 値A
+  - 100000001 = 値B
+- {prefix}_lookupid: Lookup → {prefix}_target_table
+- createdby: システム列（作成者）
+
+## 行動指針
+1. ユーザーの意図を正確に理解し、Dataverse のデータ操作を実行する
+2. レコード作成時は必須項目を必ず確認してから実行
+3. 検索結果は見やすく整形して表示する（テーブル形式推奨）
+4. 日本語で丁寧に応答する
+5. Choice 値は整数値で指定する
+
+## 条件分岐ルール
+### データの照会 → ナレッジから検索
+### 新規レコード作成 → ツール（Dataverse MCP Server）で実行
+### レコード更新 → ツールで PATCH 操作
+```
+
+### Instructions に Dataverse テーブルスキーマを含める（既存エージェント改善時に特に重要）
+
+エージェントが Dataverse テーブルを操作する場合、Instructions に **テーブル論理名・列論理名・エンティティセット名・Lookup 先** を明記する。
+ナレッジとして Dataverse テーブルを追加するだけでは、エージェントがテーブル構造を正しく理解できないケースがある。
+
+```
+## 利用可能な Dataverse テーブル
+
+### {prefix}_inquiry（問い合わせ）
+- テーブル論理名: {prefix}_inquiry
+- エンティティセット名: {prefix}_inquirys
+- 主要列:
+  - {prefix}_title: 件名
+  - {prefix}_description: 詳細（複数行テキスト）
+  - {prefix}_customer: Lookup → {prefix}_customer（お客様）
+  - {prefix}_product: Lookup → {prefix}_product（製品）
+  - {prefix}_status: Choice（100000000=新規, 100000001=対応中, 100000002=解決済み）
+  - createdby: 作成者（システム列）
+  - createdon: 作成日（システム列）
+```
+
+```
+❌ テーブル表示名だけを Instructions に記載 → エージェントが MCP で見つけられない
+❌ エンティティセット名を省略 → 検索クエリ構築時に推測が必要になる
+✅ テーブル論理名 + エンティティセット名 + 列の型と説明を含める
+✅ Lookup 先テーブルも論理名で記載
+✅ Choice 値は整数値とラベルの両方を記載
+```
+
+## 既存エージェント改善パターン
+
+新規作成だけでなく、**既存エージェントの改善**にも同じ Step 2〜8 を適用できる。
+`analyze_bot.py` で現状を分析し、改善点を特定してから設計→承認→実装の流れで進める。
+
+### 改善時の典型的な作業
+
+1. **analyze_bot.py で現状分析**: Instructions の有無、プロンプト、挨拶、クイック返信、トピック一覧、configuration を確認
+2. **改善設計を提示**: 分析結果に基づき、改善内容をユーザーに提示して承認を得る
+3. **不要カスタムトピック削除**: デフォルトの「あいさつ」「お問い合わせありがとう」等を削除（システムトピック保護）
+4. **configuration ディープマージ**: 既存の基盤モデル設定（aISettings）を保持しつつ改善設定を追加
+5. **GPT コンポーネント更新**: 既存の aISettings セクションを抽出・保持しつつ Instructions + conversationStarters を更新
+6. **ConversationStart 更新**: 挨拶メッセージ + クイック返信を設定
+7. **公開 + 説明設定**: PvaPublish 後に description を PATCH
+
+### 改善時の注意点
+
+```
+❌ 既存 Bot の configuration を丸ごと上書い → 基盤モデル・チャネル設定が消える
+❌ GPT コンポーネントの data を丸ごと上書い → aISettings のモデル選択が消える
+✅ 既存値を GET → ディープマージ → PATCH の3ステップで更新
+✅ aISettings セクションは既存 data から抽出して新 YAML 末尾に付加
+✅ optInUseLatestModels は既存値に関わらず False に設定
+```

@@ -1,0 +1,351 @@
+"""M365 管理センター private API の承認 plan を検証する。
+
+実送信はログイン済み VS Code 統合ブラウザの同一オリジン fetch で行う。
+このスクリプトは観測済み endpoint 以外を拒否し、dry-run の PLAN_HASH を生成する。
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+
+CONTRACTS = {
+    "frontier-access": {
+        "method": "POST",
+        "path": "/admin/api/settings/company/frontier/access",
+        "readBack": "/admin/api/settings/company/frontier/access",
+        "required": {"frontierPolicy", "audienceStatus"},
+        "allowed": {
+            "frontierPolicy",
+            "audienceStatus",
+            "assignedUsers",
+            "unassignedUsers",
+            "assignedGroups",
+            "unassignedGroups",
+        },
+    },
+    "agent-availability": {
+        "method": "POST",
+        "path": "/fd/addins/api/availableAgents",
+        "readBack": "/fd/addins/api/agents",
+        "required": {"Locale", "Market", "WorkloadManagementList", "SendEmailToUsers"},
+        "allowed": {"Locale", "Market", "WorkloadManagementList", "SendEmailToUsers"},
+    },
+    "agent-lifecycle": {
+        "method": "POST",
+        "path": "/fd/addins/api/apps",
+        "readBack": "/fd/addins/api/agents",
+        "required": {
+            "Locale",
+            "ContentMarket",
+            "WorkloadManagementList",
+            "UserAssignmentDetails",
+            "DeploymentRolloutType",
+            "SendEmailToUsers",
+        },
+        "allowed": {
+            "Locale",
+            "ContentMarket",
+            "WorkloadManagementList",
+            "UserAssignmentDetails",
+            "DeploymentRolloutType",
+            "SendEmailToUsers",
+        },
+    },
+    "agent-publish": {
+        "method": "POST",
+        "path": "/fd/addins/api/v2/actionableApps",
+        "readBack": "/fd/addins/api/agents",
+        "required": {"Apps"},
+        "allowed": {"Apps"},
+    },
+    # アップロード済みプラグインの新版を確定する。先に uploadCustomApp(ActionType=UPDATEAPP) で MosOperationId を得る
+    "agent-update-app": {
+        "method": "POST",
+        "path": "/fd/addins/api/apps",
+        "readBack": "/fd/addins/api/agents",
+        "required": {"Locale", "ContentMarket", "WorkloadManagementList", "SendEmailToUsers"},
+        "allowed": {"Locale", "ContentMarket", "WorkloadManagementList", "SendEmailToUsers"},
+    },
+    # 新規登録したプラグインを「インストールできる利用者」に公開する（Command=ALLOW, Workload=SharedAgent）
+    "agent-allow": {
+        "method": "POST",
+        "path": "/fd/addins/api/availableAgents",
+        "readBack": "/fd/addins/api/agents",
+        "required": {"Locale", "ContentMarket", "WorkloadManagementList", "UserAssignmentDetails", "SendEmailToUsers"},
+        "allowed": {"Locale", "ContentMarket", "WorkloadManagementList", "UserAssignmentDetails", "SendEmailToUsers"},
+    },
+    "agent-request-approve": {
+        "method": "POST",
+        "path": "/fd/addins/api/agentActions/approve",
+        "readBack": "/fd/addins/api/agents",
+        "required": {"requestIds"},
+        "allowed": {"requestIds"},
+    },
+    "agent-permission-update": {
+        "method": "POST",
+        "path": "/fd/addins/api/v2/AgentPermission/update",
+        "readBack": "/fd/addins/api/agents",
+        "required": {"ActiveDirectoryAppId", "PermissionRequestData"},
+        "allowed": {"ActiveDirectoryAppId", "PermissionRequestData"},
+    },
+    # Agent template（Autopilot 等）の「Activated for」= インスタンスを作成できる利用者。overwrite=true で全置換
+    "agent-template-activate": {
+        "method": "POST",
+        "path": "/fd/addins/api/v2/agenticapps/{titleId}/allowUsers",
+        "readBack": "/fd/addins/api/availableAgents/details/{titleId}",
+        "required": {"members", "userAssignmentCategory"},
+        "allowed": {"members", "userAssignmentCategory"},
+    },
+}
+
+TITLE_ID_RE = re.compile(r"^T_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+GUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+
+LIFECYCLE_COMMANDS = {"DEPLOY", "UPDATE", "UNDEPLOY", "ADDINTOMOSUPDATE", "ADDINMOSMERGE"}
+WORKLOAD_FIELDS = {
+    "AppsourceAssetID",
+    "ProductID",
+    "Command",
+    "ActiveDirectoryAppId",
+    "Version",
+    "AppType",
+    "AppFileName",
+    "AppFileUrl",
+    "ApplicationTemplateId",
+    "Workload",
+    "MosOperationId",
+    "TitleID",
+}
+ASSIGNMENT_FIELDS = {"Members", "DeployToEveryone", "UserAssignmentCategory"}
+PUBLISH_COMMANDS = {"APPROVE", "FINALIZEPACKAGE", "UPDATESTAGEDAPP"}
+PUBLISH_FIELDS = {"AppId", "Command", "Workload", "IterationEtag", "Version", "TitleId", "MosOperationId"}
+PERMISSION_FIELDS = {"Type", "Action", "ResourceId", "Scope", "AppId"}
+
+
+def canonical_hash(value: dict[str, Any]) -> str:
+    encoded = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def load_payload(path: str) -> dict[str, Any]:
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise SystemExit(f"payload を読み込めません: {error}") from error
+    if not isinstance(value, dict):
+        raise SystemExit("payload は JSON object で指定してください。")
+    return value
+
+
+def validate_assignments(assignments: Any) -> None:
+    if not isinstance(assignments, dict):
+        raise SystemExit("UserAssignmentDetails は JSON object で指定してください。")
+    unknown_assignments = sorted(set(assignments) - ASSIGNMENT_FIELDS)
+    if unknown_assignments:
+        raise SystemExit(f"未確認の UserAssignmentDetails field です: {', '.join(unknown_assignments)}")
+    if set(assignments) != ASSIGNMENT_FIELDS:
+        raise SystemExit("UserAssignmentDetails の field が不足しています。")
+    if not isinstance(assignments["Members"], list):
+        raise SystemExit("Members は配列で指定してください。")
+    for member in assignments["Members"]:
+        if not isinstance(member, dict) or set(member) != {"Id", "Type"}:
+            raise SystemExit("Members の各要素には Id と Type が必要です。")
+        if member["Type"] not in {"User", "Group"}:
+            raise SystemExit("Member Type は User または Group で指定してください。")
+    if not isinstance(assignments["DeployToEveryone"], bool):
+        raise SystemExit("DeployToEveryone は boolean で指定してください。")
+    if assignments["UserAssignmentCategory"] not in {"None", "Everyone", "SpecificUsers", "NoOne"}:
+        raise SystemExit("未確認の UserAssignmentCategory です。")
+
+
+def validate_payload(operation: str, payload: dict[str, Any]) -> None:
+    contract = CONTRACTS[operation]
+    unknown = sorted(set(payload) - contract["allowed"])
+    missing = sorted(contract["required"] - set(payload))
+    if unknown:
+        raise SystemExit(f"未確認の payload field です: {', '.join(unknown)}")
+    if missing:
+        raise SystemExit(f"必須 payload field がありません: {', '.join(missing)}")
+    if operation == "frontier-access":
+        for key in ("assignedUsers", "unassignedUsers", "assignedGroups", "unassignedGroups"):
+            if key in payload and not isinstance(payload[key], list):
+                raise SystemExit(f"{key} は配列で指定してください。")
+    if operation == "agent-availability" and not isinstance(payload["WorkloadManagementList"], list):
+        raise SystemExit("WorkloadManagementList は配列で指定してください。")
+    if operation == "agent-lifecycle":
+        workloads = payload["WorkloadManagementList"]
+        if not isinstance(workloads, list) or not workloads:
+            raise SystemExit("WorkloadManagementList は空でない配列で指定してください。")
+        for workload in workloads:
+            if not isinstance(workload, dict):
+                raise SystemExit("WorkloadManagementList の各要素は JSON object で指定してください。")
+            unknown_workload = sorted(set(workload) - WORKLOAD_FIELDS)
+            if unknown_workload:
+                raise SystemExit(f"未確認の workload field です: {', '.join(unknown_workload)}")
+            if workload.get("Command") not in LIFECYCLE_COMMANDS:
+                raise SystemExit("未確認の lifecycle Command です。")
+            if not workload.get("ProductID") and not workload.get("AppsourceAssetID"):
+                raise SystemExit("workload には ProductID または AppsourceAssetID が必要です。")
+        validate_assignments(payload["UserAssignmentDetails"])
+        if payload["DeploymentRolloutType"] not in {"None", "FullRollout", "TestRollout"}:
+            raise SystemExit("未確認の DeploymentRolloutType です。")
+        if not isinstance(payload["SendEmailToUsers"], bool):
+            raise SystemExit("SendEmailToUsers は boolean で指定してください。")
+    if operation == "agent-publish":
+        apps = payload["Apps"]
+        if not isinstance(apps, list) or not apps:
+            raise SystemExit("Apps は空でない配列で指定してください。")
+        for app in apps:
+            if not isinstance(app, dict):
+                raise SystemExit("Apps の各要素は JSON object で指定してください。")
+            unknown_app = sorted(set(app) - PUBLISH_FIELDS)
+            if unknown_app:
+                raise SystemExit(f"未確認の publish field です: {', '.join(unknown_app)}")
+            if not app.get("AppId") or not app.get("Workload"):
+                raise SystemExit("publish app には AppId と Workload が必要です。")
+            if app.get("Command") not in PUBLISH_COMMANDS:
+                raise SystemExit("未確認の publish Command です。")
+    if operation == "agent-update-app":
+        workloads = payload["WorkloadManagementList"]
+        if not isinstance(workloads, list) or len(workloads) != 1 or not isinstance(workloads[0], dict):
+            raise SystemExit("WorkloadManagementList は要素 1 つの配列で指定してください。")
+        workload = workloads[0]
+        unknown_workload = sorted(set(workload) - WORKLOAD_FIELDS)
+        if unknown_workload:
+            raise SystemExit(f"未確認の workload field です: {', '.join(unknown_workload)}")
+        if workload.get("Command") != "UPDATEAPP":
+            raise SystemExit("agent-update-app の Command は UPDATEAPP だけです。")
+        for key in ("ProductID", "TitleID", "MosOperationId", "Version", "Workload"):
+            if not isinstance(workload.get(key), str) or not workload[key].strip():
+                raise SystemExit(f"{key} は空でない文字列で指定してください。")
+        if payload["SendEmailToUsers"] is not False:
+            raise SystemExit("agent-update-app では SendEmailToUsers=false のみ許可します。")
+    if operation == "agent-allow":
+        workloads = payload["WorkloadManagementList"]
+        if not isinstance(workloads, list) or len(workloads) != 1 or not isinstance(workloads[0], dict):
+            raise SystemExit("WorkloadManagementList は要素 1 つの配列で指定してください。")
+        workload = workloads[0]
+        unknown_workload = sorted(set(workload) - WORKLOAD_FIELDS)
+        if unknown_workload:
+            raise SystemExit(f"未確認の workload field です: {', '.join(unknown_workload)}")
+        if workload.get("Command") != "ALLOW" or workload.get("Workload") != "SharedAgent":
+            raise SystemExit("agent-allow は Command=ALLOW / Workload=SharedAgent だけです。")
+        if not workload.get("ProductID"):
+            raise SystemExit("workload には ProductID が必要です。")
+        validate_assignments(payload["UserAssignmentDetails"])
+        if not isinstance(payload["SendEmailToUsers"], bool):
+            raise SystemExit("SendEmailToUsers は boolean で指定してください。")
+    if operation == "agent-request-approve":
+        request_ids = payload["requestIds"]
+        if not isinstance(request_ids, list) or not request_ids:
+            raise SystemExit("requestIds は空でない配列で指定してください。")
+        if any(not isinstance(value, str) or not value.strip() for value in request_ids):
+            raise SystemExit("requestIds の各要素は空でない文字列で指定してください。")
+    if operation == "agent-permission-update":
+        if not isinstance(payload["ActiveDirectoryAppId"], str) or not payload["ActiveDirectoryAppId"].strip():
+            raise SystemExit("ActiveDirectoryAppId は空でない文字列で指定してください。")
+        requests = payload["PermissionRequestData"]
+        if not isinstance(requests, list) or not requests:
+            raise SystemExit("PermissionRequestData は空でない配列で指定してください。")
+        for request in requests:
+            if not isinstance(request, dict) or set(request) != PERMISSION_FIELDS:
+                raise SystemExit("permission request の field が一致しません。")
+            if request["Type"] not in {"Scope", "Role"}:
+                raise SystemExit("permission Type は Scope または Role で指定してください。")
+            if request["Action"] not in {"Grant", "Revoke"}:
+                raise SystemExit("permission Action は Grant または Revoke で指定してください。")
+            for key in ("ResourceId", "Scope", "AppId"):
+                if not isinstance(request[key], str) or not request[key].strip():
+                    raise SystemExit(f"{key} は空でない文字列で指定してください。")
+    if operation == "agent-template-activate":
+        category = payload["userAssignmentCategory"]
+        members = payload["members"]
+        if category not in {"SpecificUsers", "Everyone"}:
+            raise SystemExit("userAssignmentCategory は SpecificUsers または Everyone で指定してください。")
+        if not isinstance(members, list):
+            raise SystemExit("members は配列で指定してください。")
+        if category == "SpecificUsers" and not members:
+            raise SystemExit("SpecificUsers では members を 1 件以上指定してください（全置換のため空にすると誰も作成できなくなる）。")
+        seen: set[str] = set()
+        for member in members:
+            if not isinstance(member, dict) or set(member) != {"id", "type"}:
+                raise SystemExit("members の各要素は id と type だけを持つ object にしてください。")
+            if member["type"] not in {"User", "Group"}:
+                raise SystemExit("member type は User または Group で指定してください。")
+            if not isinstance(member["id"], str) or not GUID_RE.match(member["id"]):
+                raise SystemExit("member id は Entra オブジェクト ID（GUID）で指定してください。")
+            if member["id"].lower() in seen:
+                raise SystemExit("members に重複した id があります。")
+            seen.add(member["id"].lower())
+
+
+def build_plan(args: argparse.Namespace) -> dict[str, Any]:
+    payload = load_payload(args.payload_file)
+    validate_payload(args.operation, payload)
+    contract = CONTRACTS[args.operation]
+    path = contract["path"]
+    read_back = contract["readBack"]
+    query: dict[str, str] = {}
+    read_back_query: dict[str, str] = {}
+    if args.operation == "agent-availability":
+        if not args.bot_id or not args.environment_id:
+            raise SystemExit("agent-availability では --bot-id と --environment-id が必須です。")
+        query = {"botId": args.bot_id, "environmentId": args.environment_id}
+    if args.operation == "agent-request-approve":
+        if not args.workload:
+            raise SystemExit("agent-request-approve では --workload が必須です。")
+        query = {"workload": args.workload}
+    if args.operation == "agent-template-activate":
+        title_id = getattr(args, "title_id", None) or ""
+        if not TITLE_ID_RE.match(title_id):
+            raise SystemExit("agent-template-activate では --title-id（T_<GUID>）が必須です。")
+        path = path.format(titleId=title_id)
+        read_back = read_back.format(titleId=title_id)
+        query = {"workloads": "SharedAgent", "overwrite": "true"}
+        read_back_query = {"workload": "SharedAgent", "extendedProperties": "AllowedUsersAndGroups"}
+    plan = {
+        "origin": "https://admin.cloud.microsoft",
+        "operation": args.operation,
+        "method": contract["method"],
+        "path": path,
+        "query": query,
+        "payload": payload,
+        "readBack": read_back,
+    }
+    if read_back_query:
+        plan["readBackQuery"] = read_back_query
+    return plan
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("operation", choices=sorted(CONTRACTS))
+    parser.add_argument("--payload-file", required=True)
+    parser.add_argument("--bot-id")
+    parser.add_argument("--environment-id")
+    parser.add_argument("--workload")
+    parser.add_argument("--title-id", help="agent-template-activate の対象 titleId（T_<GUID>）")
+    parser.add_argument("--expected-hash")
+    parser.add_argument("--apply", action="store_true")
+    args = parser.parse_args()
+
+    plan = build_plan(args)
+    digest = canonical_hash(plan)
+    print(json.dumps(plan, ensure_ascii=False, indent=2))
+    print(f"PLAN_HASH={digest}")
+    if not args.apply:
+        print("DRY-RUN: 変更していません。")
+        return
+    if args.expected_hash != digest:
+        raise SystemExit("承認済み plan hash が一致しません。")
+    print("READY_FOR_BROWSER_API")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,116 @@
+"""MCP Server 用の Entra アプリ登録に API スコープを公開し、クライアントを事前承認する。
+
+auth_helper のキャッシュ認証で Microsoft Graph を呼ぶため Azure CLI ログインは不要。
+
+使い方:
+    python .github/skills/mcp-server/scripts/configure_entra_api.py
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import uuid
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "standard" / "scripts"))
+
+from azure_helper import graph_get, graph_patch  # noqa: E402
+
+# auth_helper / Azure CLI / Azure PowerShell が使う Microsoft 発行のパブリッククライアント
+DEFAULT_PREAUTH_CLIENT_IDS = [
+    "04b07795-8ddb-461a-bbee-02f9e1bf7b46",  # Microsoft Azure CLI
+    "1950a258-227b-4e31-a9cf-717495945fc2",  # Microsoft Azure PowerShell
+]
+
+
+def _scope_texts() -> tuple[str, str]:
+    # 同意画面に表示される。MCP 以外の API（トークン発行等）にも使うため、用途に合わせて .env で指定する
+    label = os.getenv("MCP_API_SCOPE_LABEL", "MCP サーバーへのアクセス")
+    description = os.getenv("MCP_API_SCOPE_DESCRIPTION", "MCP サーバーのツールを呼び出す権限")
+    return label, description
+
+
+def _new_scope(scope_value: str) -> dict:
+    label, description = _scope_texts()
+    return {
+        "id": str(uuid.uuid4()),
+        "value": scope_value,
+        "type": "User",
+        "isEnabled": True,
+        "adminConsentDisplayName": label,
+        "adminConsentDescription": description,
+        "userConsentDisplayName": label,
+        "userConsentDescription": description,
+    }
+
+
+def main() -> int:
+    app_id = os.getenv("MCP_API_APP_ID")
+    if not app_id:
+        print("MCP_API_APP_ID を .env に設定してください")
+        return 1
+    scope_value = os.getenv("MCP_API_SCOPE_VALUE", "MCP.Access")
+    preauth = [c.strip() for c in os.getenv("MCP_PREAUTH_CLIENT_IDS", "").split(",") if c.strip()]
+    preauth = preauth or DEFAULT_PREAUTH_CLIENT_IDS
+
+    app = graph_get(f"/applications(appId='{app_id}')")
+    object_id = app["id"]
+    api = app.get("api") or {}
+    scopes = api.get("oauth2PermissionScopes") or []
+
+    scope = next((s for s in scopes if s["value"] == scope_value), None)
+    if scope is None:
+        scope = _new_scope(scope_value)
+        scopes.append(scope)
+        print(f"スコープ {scope_value} を追加します")
+    else:
+        print(f"スコープ {scope_value} は既に存在します")
+        label, description = _scope_texts()
+        if os.getenv("MCP_API_SCOPE_LABEL") and scope.get("userConsentDisplayName") != label:
+            # 表示文言だけを更新する（id と value は変えない）
+            scope.update({"adminConsentDisplayName": label, "adminConsentDescription": description,
+                          "userConsentDisplayName": label, "userConsentDescription": description})
+            print(f"スコープ {scope_value} の表示名を「{label}」に更新します")
+
+    # スコープ登録と事前承認を同一 PATCH で送ると新規スコープ ID が未登録扱いになるため分割する
+    graph_patch(
+        f"/applications/{object_id}",
+        {
+            "identifierUris": app.get("identifierUris") or [f"api://{app_id}"],
+            "api": {**api, "oauth2PermissionScopes": scopes},
+        },
+    )
+    # 現在有効なスコープ id の集合。過去にスコープを作り直した際の古い id が
+    # preAuthorizedApplications に残っていると、Copilot Studio 等のクライアントで
+    # 同意チェックが食い違い、断続的な認可エラーの原因になる。既存値を無条件にマージせず、
+    # 無効な id はここで検出して落とす。
+    valid_scope_ids = {s["id"] for s in scopes}
+    existing_preauth: dict[str, set[str]] = {}
+    for item in api.get("preAuthorizedApplications") or []:
+        ids = set(item.get("delegatedPermissionIds") or [])
+        stale = ids - valid_scope_ids
+        if stale:
+            print(f"[warning] {item['appId']} の preAuthorizedApplications から無効な scope id を削除: {sorted(stale)}")
+            ids -= stale
+        existing_preauth[item["appId"]] = ids
+    for client_id in preauth:
+        existing_preauth.setdefault(client_id, set()).add(scope["id"])
+    graph_patch(
+        f"/applications/{object_id}",
+        {
+            "api": {
+                "preAuthorizedApplications": [
+                    {"appId": client_id, "delegatedPermissionIds": sorted(permission_ids)}
+                    for client_id, permission_ids in sorted(existing_preauth.items())
+                ]
+            }
+        },
+    )
+    print(f"アプリ登録を更新しました（スコープ公開 + クライアント {len(preauth)} 件の事前承認）")
+    print(f"audience: api://{app_id}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

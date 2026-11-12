@@ -1,0 +1,20 @@
+{
+  "description": "Foundry Autopilot で動く AI チームメイトのオーバーレイ（quickstart に重ねる）",
+  "variables": [
+    "AGENT_DISPLAY_NAME",
+    "AGENT_ROLE",
+    "AGENT_PERSONALITY",
+    "EMAIL_POLICY",
+    "COMMUNICATION_STYLE",
+    "EXTERNAL_EMAIL_POLICY",
+    "IMAGE_POLICY",
+    "SHARING_POLICY",
+    "SENSITIVE_DATA_POLICY"
+  ],
+  "derivedVariables": [
+    "PKG",
+    "COMMUNICATION_STYLE",
+    "EXTERNAL_EMAIL_POLICY",
+    "IMAGE_POLICY"
+  ]
+}

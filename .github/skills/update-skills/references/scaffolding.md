@@ -1,0 +1,167 @@
+# テンプレート同梱とスキャフォールド
+
+「サンプルを読んで真似してもらう」ではなく、**テンプレートから作業ツリーを生成して始められる**
+状態でスキルを配るための標準。`scripts/scaffold_from_template.py` がこの規約を実装している。
+
+スキル固有のスキャフォールダーを毎回書かないこと。書くのは `templates/` とマニフェストだけで、
+生成ロジック（置換・ブロック・未解決検出）は共通実装に任せる。
+
+## 1. 置き場所
+
+```
+<skill-name>/
+├── SKILL.md
+├── references/
+│   └── .env.example          # テンプレートが使う変数はここに定義する
+├── scripts/
+└── templates/
+    └── <template-name>/
+        ├── scaffold.json     # このテンプレートの宣言（推奨）
+        ├── README.md
+        └── __PKG__/
+            └── main.py
+```
+
+テンプレート名は用途で分ける（例: `foundry-autopilot`、`code-app-basic`）。
+1 スキルに複数のテンプレートを置いてよい。
+
+## 2. 変数（`${VAR}` と `__VAR__`）
+
+| 記法 | 使う場所 | 例 |
+|---|---|---|
+| `${VAR}` | ファイルの**中身** | `AGENT_NAME = "${AGENT_DISPLAY_NAME}"` |
+| `__VAR__` | ファイル名・**フォルダ名** | `__PKG__/main.py` → `auri_agent/main.py` |
+
+置換対象は **UPPER_SNAKE_CASE のみ**。TypeScript のテンプレートリテラル `` `${count}` `` や
+シェルの `${1}` を変数と誤認しないための線引きで、テンプレートに JS/TS/シェルを混ぜても壊れない。
+
+値の解決順は `.env` → `--var KEY=VALUE`（後勝ち）。プロセスの環境変数は
+**マニフェストで宣言された名前だけ**参照する。`os.environ` を丸ごと流し込むと、
+`${PATH}` のような偶然の一致で開発マシンの値が黙って埋め込まれる。
+
+バイナリ（画像・GLB・HDR・フォント・wasm など）は置換せず、そのままコピーする。
+拡張子の一覧に加えて中身（NUL バイト・UTF-8 として読めない）でも判定するため、新しい種類の素材を足しても生成は止まらない。
+テンプレート内のテキストを UTF-8 以外で保存しないこと（バイナリ扱いになり、変数が置換されない）。
+
+## 3. `scaffold.json`（マニフェスト）
+
+すべて任意キーだが、**置くこと自体が「共通スキャフォールダーで配る」宣言**になる。
+
+```json
+{
+  "description": "Foundry Autopilot で動く AI チームメイトのオーバーレイ",
+  "variables": ["AGENT_DISPLAY_NAME", "AGENT_ROLE"],
+  "optionalVariables": ["IMAGE_MODEL_DEPLOYMENT"],
+  "derivedVariables": ["PKG"],
+  "preserveUndeclaredVariables": false,
+  "blockFiles": { "B17": ["image_tools.py"] },
+  "nextSteps": ["python scripts/provision_image_model.py --execute"]
+}
+```
+
+| キー | 意味 |
+|---|---|
+| `variables` | `.env` から取る必須の値。`references/.env.example` にも定義する |
+| `optionalVariables` | 無くても生成できる値（機能ブロックの有効化など）。答えが無ければ空文字で置き換える |
+| `envOnly` | テンプレートのファイルには書かず、`--write-env` で生成先の `.env` にだけ書く値（環境 ID・Dataverse URL など）。`validate_skill.py` の「使われていない」警告から外れる。`variables` / `optionalVariables` にも書く |
+| `derivedVariables` | 呼び出し側が組み立てて `--var` で渡す値（パッケージ名など）。`.env` には現れない |
+| `preserveUndeclaredVariables` | `true` のとき未宣言の `${UPPER_SNAKE}` を実行時コードとして保持する。TypeScript 等で大文字定数のテンプレートリテラルを含む場合だけ使う |
+| `blockFiles` | ファイル名 → 機能ブロック。選ばれていないブロックのファイルは生成しない |
+| `nextSteps` | 生成直後に人が実行する手順。**生成物の外にある依存**をここに書く（→ 6 節） |
+| `extends` | ベース テンプレートへの相対パス（例: `../generic-base`）。ベースを先に展開し、同じパスのファイルは継承側が上書きする。変数宣言と `blockFiles` は合算、`nextSteps` は継承側を優先。業務テンプレートにベースをコピーして二重管理しないために使う |
+| `questions` | 変数ごとの質問（AskUserQuestion で聞く）。`variable` / `question` 必須、`choices` / `default` / `detect`（先に自動で調べる方法）/ `sameAs`（別の変数と同じ値。聞かない）は任意。継承側の同じ変数は上書き（→ 8 節） |
+
+> 生成先に `.git` / `.github` / `.vscode` / `.env` しか無い場合は空とみなす。スキルを取得した作業ルート（`--target .`）へ
+> `--force` なしで生成できる。それ以外のファイルがある場合は従来どおり停止する。
+
+## 4. 機能ブロック（部分的な生成）
+
+ファイル単位は `blockFiles`、ファイル内の一部は行マーカーで切り替える。
+
+```python
+# SCAFFOLD:BLOCK:B17:START
+from .image_tools import build_image_tool
+# SCAFFOLD:BLOCK:B17:END
+```
+
+`--blocks B17` で選ばれたブロックは**マーカー行だけ消して中身を残す**。
+選ばれなければ中身ごと落ちる。マーカーが無いファイルは素通しする。
+
+## 5. 未解決の変数は必ず失敗させる
+
+置換されずに残った宣言済み `${UPPER_SNAKE}` があると、スキャフォールダーは**1 ファイルも書かずに終了する**
+（終了コード 3、残った変数名を全部並べる）。
+
+既定では未宣言トークンも typo として停止する。TypeScript の `` `${MAX_ITEMS}` `` のような実行時式と
+共存するテンプレートだけ `preserveUndeclaredVariables: true` を明示する。パスの `__VAR__` はこの設定に関係なく
+必ず宣言が必要で、未解決なら停止する。
+
+未解決のまま書き出すと、生成物は「そのまま動かないコード」になり、原因がテンプレート由来だと
+分からなくなる。壊れた成果物を渡すより、生成前に止める方が安い。
+
+## 6. 生成ツリーの外にある依存を明示する
+
+テンプレートが揃っていても、**Azure リソースやモデル デプロイのように生成ツリーの外にある依存**が
+足りなければ動かない。ここが最も見落とされる。
+
+- `nextSteps` に「先に実行すべきコマンド」を書き、生成直後に表示させる。
+- それだけで終わらせず、**デプロイ/発行スクリプト側に実在確認のプリフライトを足す**
+  （原則 6・再発防止）。次の手順を読み飛ばしても、発行時に落ちる。
+
+実例: 画像生成の `IMAGE_MODEL_DEPLOYMENT` は、スキャフォールド直後の状態では Azure 側に
+デプロイが存在せず、発行しても環境変数が渡らないためツールが登録されない。
+どこにもエラーが出ないまま「機能だけ無い」エージェントが出来上がっていた。
+対策は `nextSteps` での明示と、発行スクリプトでの `assert_image_deployment_exists()` の二段構え。
+
+## 7. 検証
+
+`validate_skill.py` は `scaffold.json` を持つテンプレートだけを検査する。
+
+- テンプレートで使っている `${VAR}` / `__VAR__` が**マニフェストで宣言されているか**（error）
+- 宣言したのに使われていない変数（warning）
+- `variables` / `optionalVariables` が `references/.env.example` にあるか（warning）
+
+マニフェストを置いていないテンプレートは対象外。すべてのテンプレートを無条件に走査すると、
+JS/TS のテンプレートリテラルを未宣言変数として拾い、誤検出だらけになって誰も見なくなる。
+
+生成せずに変数だけ確認したいときは:
+
+```powershell
+python .github/skills/update-skills/scripts/scaffold_from_template.py `
+  --template .github/skills/<skill-name>/templates/<template-name> --list-variables
+```
+
+## 8. スキル側に書くこと
+
+`SKILL.md` には「テンプレートがある」ことと**生成コマンド 1 行**を書く。
+テンプレートの中身の説明は書かない（生成すれば読める）。
+
+```powershell
+python .github/skills/update-skills/scripts/scaffold_from_template.py `
+  --template .github/skills/<skill-name>/templates/<template-name> `
+  --target <出力先> --var PKG=<package_name> --dry-run
+```
+
+`--dry-run` で生成計画を確認 → 問題なければ外して実行、を既定の流れにする。
+
+## 8. 未解決の変数を調査し、必要な判断だけ質問する（`questions`）
+
+環境ごとに違う値（環境 ID・プレフィックス・リソース名など）が多いテンプレートは、`scaffold.json` に `questions` を書き、
+エージェントが既存 `.env`・資料・承認済み設定・環境 API・`detect`・`sameAs`・安全な既定値から解決して生成する。
+`questions` は変数を漏らさないための一覧であり、各項目でポップアップを出す指示ではない。
+クイックスタートでは認証後の要望確認で必ず一度停止し、その回答後は自分で分かることを調べて進む。
+本人の判断が不可欠な未解決値・承認範囲外の操作だけを AskUserQuestion で確認する。
+
+```powershell
+# 1. まだ答えの無い質問（JSON）。detect があれば先に調べて choices に並べ、default は推奨として先頭に置く
+python .github/skills/update-skills/scripts/scaffold_from_template.py --template <dir> --questions --env answers.env
+# 2. 調査結果を answers.env に KEY=VALUE で保存。調べられない必須判断だけ質問 → 1. が [] になるまで解決
+# 3. 生成し、答えをアプリの .env にも書く（既にあるキーは上書きしない）
+python .github/skills/update-skills/scripts/scaffold_from_template.py --template <dir> --target <out> --env answers.env --write-env <out>/.env
+```
+
+- 出す順は `questions` の順。質問の無い必須変数も、名前だけの質問として最後に出す（聞き漏らしを防ぐ）。
+- `sameAs` の変数（例: `VITE_DATAVERSE_URL` = `DATAVERSE_URL`）は聞かずに元の答えを使う。
+- 秘密（シークレット・キー）は質問にしない。生成後のスクリプトが作り、`.env` や Key Vault に入れる。
+- `validate_skill.py` は、質問が宣言済みの変数を指しているか・`question` が空でないか・`choices` が空でないかを検査し、
+  質問の無い必須変数を警告する。単体テストは `scripts/test_scaffold_questions.py`。

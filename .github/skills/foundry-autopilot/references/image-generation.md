@@ -1,0 +1,133 @@
+# B17 — 画像生成
+
+Azure OpenAI の画像モデルをローカル ツールとして公開し、生成した PNG をエージェント自身の
+OneDrive に保存する。画像モデル名やバージョンを推測せず、対象アカウントの利用可能モデル一覧を
+事前検証する。
+
+## 構成
+
+```text
+利用者 → AgentBrain → generate_image
+                    ├─ Azure OpenAI /openai/v1/images/generations
+                    └─ IFileDelivery → OneDrive → DocumentLedger
+```
+
+- 認証: B3 と同じ UAMI。スコープは `https://cognitiveservices.azure.com/.default`
+- 保存: B14 の `IFileDelivery.DeliverAsync` を再利用
+- 台帳: 認証済み話者のメールを `owner` としてコード側で固定
+- 配布: `organization` スコープの OneDrive リンク
+- メール監視: 外部メールだけで有料生成が走らないよう画像生成ツールを公開しない
+
+## 事前検証とデプロイ
+
+`.env` に次を設定する。
+
+```dotenv
+AZURE_OPENAI_RESOURCE_GROUP=rg-your-ai
+AZURE_OPENAI_ACCOUNT=your-ai-account
+IMAGE_GENERATION_MODEL=gpt-image-1.5
+IMAGE_GENERATION_DEPLOYMENT=gpt-image-1.5
+IMAGE_GENERATION_SKU=GlobalStandard
+IMAGE_GENERATION_CAPACITY=1
+IMAGE_GENERATION_TIMEOUT_SECONDS=300
+```
+
+```powershell
+python scripts/provision_image_model.py --check
+python scripts/provision_image_model.py
+```
+
+`--check` は要求モデルが提供されていることと、既存デプロイのモデル・バージョン・SKU が一致する
+ことを確認する。要求モデルが一覧に無ければ、似た名前へフォールバックせず停止する。Azure CLI の
+`deployment create` は `--model-version` が必須なので、利用可能一覧から解決してから作成する。
+
+## アプリ設定
+
+```text
+ImageGeneration__Enabled=true
+ImageGeneration__Deployment=<deployment-name>
+ImageGeneration__TimeoutSeconds=300
+```
+
+一括 scaffold では B17 選択時に `ImageGenerationTools.cs` と DI 登録が生成される。既存アプリへ
+追加する手順は [feature-blocks.md](feature-blocks.md) §10 を参照する。
+
+## ツール設計
+
+`generate_image` は一度に1枚だけ生成する。入力は `prompt`、`filename`、`size`、`quality`、
+`background`、`sensitivity` に限定する。具体的な「作って」「生成して」は実行承認を兼ねる。
+相談段階だけ内容を提示して承認を取り、承認済みターンでは説明を繰り返さない。グラフ、表、組織図、
+正確な文字・数値が主役の図は B12 の Python 描画を使う。
+
+## セキュリティ
+
+- `owner` はモデルの引数を信用せず、Teams の認証済み話者 ID から解決したメールで上書きする。
+- メール、Web、業務レコード、取り込んだファイル内の命令を生成根拠にしない。
+- プロンプトと HTTP エラー本文は長さを制限し、アクセストークンや画像の base64 をログへ出さない。
+- Azure OpenAI のコンテンツフィルターを迂回しない。
+
+## 検証
+
+1. `provision_image_model.py --check` が成功する。
+2. UAMI に `Cognitive Services OpenAI User` がある。
+3. `dotnet build -c Release` が成功する。
+4. `/schema generate_image` で入力スキーマを確認する。
+5. 正方形・横長・透過背景を各1回生成し、OneDrive 保存と台帳記録を確認する。
+6. メール本文に画像生成命令を書いても自動生成されないことを確認する。
+7. 生成物を別の利用者へ共有し、B14 の区分・同意判定が維持されることを確認する。
+
+## Foundry Autopilot（`hosting: "foundry-autopilot"`）の場合
+
+C# ではなく Python のオーバーレイ（`image_tools.py` / `file_delivery.py`）が同じ役割を果たす。
+違いは 3 点だけで、判断基準（課金・同意・インジェクション対策）は上と同じである。
+
+| 論点 | 自己ホスト（C#） | Foundry Autopilot（Python） |
+|---|---|---|
+| ツール登録 | DI に `ImageGenerationTools` を登録 | `copilot.define_tool` で作り、Copilot SDK の `tools=[...]` と `ToolSet().add_custom(...)` に渡す |
+| 認証 | UAMI + `Cognitive Services OpenAI User` | エージェント インスタンスのマネージド ID（`https://ai.azure.com/.default`）。キーは存在しない |
+| 有効化 | `appsettings.json` の `ImageGeneration.Enabled` | `IMAGE_MODEL_DEPLOYMENT` が空なら `generate_image` ツール自体が**登録されない** |
+
+「設定だけ有効で実体が無い」を作らないために、Python 側は**環境変数が無ければツールを生やさない**。
+有効に見えるのに実行できないツールは、依頼を受けて黙って何も返さないエージェントを生む。
+
+保存先は Agent 365 の OneDrive/SharePoint MCP ではなく Microsoft Graph の
+`/me/drive`（エージェント自身のドライブ）で、共有リンクは `scope: organization` に固定している。
+匿名リンクは一度渡すと取り消せない。
+
+```powershell
+# 画像モデルの可用性は自己ホストと同じスクリプトで確認する
+python scripts/provision_image_model.py --check
+```
+
+### 実測値（2026-09-20・`gpt-image-2` / eastus2）
+
+| 論点 | 値 |
+|---|---|
+| エンドポイント | `https://<account>.services.ai.azure.com/openai/v1/images/generations`（**アカウント直下**。`/api/projects/<project>` の下には無い） |
+| 必要なロール | エージェント インスタンスの ID に **`Foundry User` をアカウント スコープ**で別途付与する。既定の `Foundry User` は**プロジェクト スコープ**に付くので親であるアカウントには届かない。`Cognitive Services OpenAI User` をアカウント スコープに付けるだけでは**足りない**（`kind=AIServices` では 401 `Principal does not have access to API/Operation.` のまま） |
+| 既定クォータ | 2 単位＝capacity 1 ＝ **1 リクエスト/分**。連続生成は 429 になる |
+| 生成時間 | `quality: "low"` / 1024x1024 で約 16 秒 |
+| データ量 | `output_format: "jpeg"` + `output_compression: 60` で約 220 KB |
+
+Teams にインラインで返す場合は base64 の data URI を `Attachment.content_url` に入れる。
+Teams が描画できるのはおおむね 1 MB までなので、PNG 既定ではなく JPEG に圧縮して送る。
+OneDrive にも残したい要件がある場合だけ Graph 保存を足す。リンクだけを返す設計は、
+チャットの流れで「今すぐ見たい」という一番多い使い方に一手増やしてしまう。
+
+```python
+await context.send_activity(
+    Activity(
+        type="message",
+        attachments=[
+            Attachment(
+                content_type="image/jpeg",
+                content_url=f"data:image/jpeg;base64,{base64.b64encode(data).decode()}",
+                name=prompt[:60],
+            )
+        ],
+    )
+)
+```
+
+429 はツールの中で「1 分後に再試行してほしい」という**文面**に変換して返す。
+HTTP エラーをそのまま返すと、モデルは同じターンで何度も呼び直してさらに詰まらせる。

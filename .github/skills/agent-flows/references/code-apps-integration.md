@@ -1,0 +1,44 @@
+# Code Apps And Existing Bot Integration
+
+## Implementation Sequence
+
+1. Keep the existing app and v1 channel available. Develop the new path behind a disabled-by-default feature setting.
+2. Code Apps creates a user-owned Dataverse request with a server-generated ID, client correlation key, base design revision/hash, operation, bounded input JSON and Pending status.
+3. A Dataverse-triggered flow claims the request using an atomic conditional update or insert-only result row with a unique request lookup. Invocation depends on successful claim creation. Trigger concurrency alone is not deduplication. Duplicate events must not start duplicate billable Agent calls or overwrite a completed result.
+4. Invoke the chosen engine and persist a terminal result through a separate result table or a server-validated transition. An inline Agent is not an existing v2 bot.
+5. The app reads only authorized results, supports bounded polling/cancellation/timeouts and ignores stale responses after navigation or base design changes.
+6. Parse the response through the app's existing design schema and domain validators. AI output is a proposal. With explicit product approval, validated candidates may update an unsaved editing draft with Undo; shared saving or publishing always remains an explicit user action.
+
+## Required Existing V2 Bot Proof
+
+The new designer offers an existing Agent node. Capture its selected-bot connector operation, bot schema name, inputs and output shape from a dedicated draft.
+Verify the exact existing bot with a fixed response and then its skill/MCP execution. Do not infer that `InvokeDefinition` calls that bot, or that classic `ExecuteCopilotAsyncV2` supports the new architecture.
+Until this contract is verified, implement and test the request/result adapter independently; do not substitute another model silently.
+
+## Conversational Wizard And Assistant
+
+Use one in-app conversation beside the preview. Persist a conversation ID, turn ID and monotonically increasing
+conditions version with each request; include bounded conversation context and confirmed structured conditions.
+The agent asks for missing conditions or returns a candidate, while code validates the response discriminant and payload.
+Keep confirmed conditions and the preview separate from the saved design. Never describe a local canned response as an Agent reply.
+
+New messages may be collected during generation, but supersede older conditions explicitly. A result must match the
+conversation, turn, conditions version, base revision/hash and selected object before it can update a preview or assistant answer.
+Show only persisted execution states, not guessed progress percentages. A timeout is indeterminate until reconciled;
+local cancellation does not authorize another billable call or guarantee remote cancellation.
+
+Reuse the request/result transport for the existing assistant only after its selected-object context and user authorization
+tests pass. Use distinct allowlisted operations for design proposals and read-only knowledge answers, with separate validators.
+Enable each path independently after real response tests. Preserve the existing assistant and manual fallback until then.
+
+## Security And Acceptance
+
+- Request CreatedBy comes from Dataverse, never a client-supplied identity. Use a globally unique turn UUID key or a supported requester-scoped key; verify actual key activation and duplicate rejection. A system-managed CreatedBy lookup may not be eligible for the desired alternate key. Uniqueness does not replace authorization.
+- Restrict request payload operations and sizes server-side. Ordinary users must not set Completed/result/engine identity fields.
+- A maker-owned connector runs with maker permissions, not requester permissions. Filter/authorize data retrieval for the requester or restrict the operation to the submitted design payload. This must be proven before enabling real knowledge retrieval.
+- Results need explicit sharing/ownership matching the requesting user. Test with a second ordinary user that cross-user reads and writes fail.
+- Conditional state transitions, retries, cancellation, timeouts and late completion must have deterministic behavior. UI cancellation alone does not cancel remote processing.
+- Design results must preserve locked modules, specified boundary/exclusions, base revision and output limits. Selected-object requests must additionally preserve unrelated units and connections. Only an explicitly approved unsaved-draft auto-apply mode may change the preview; never automatically save, email or change external resources.
+- Acceptance gates: Dataverse round-trip, duplicate delivery, failure/timeout, stale response, ordinary-user authorization, exact existing bot/skill invocation, desktop/mobile workflow, explicit adoption.
+
+The lifecycle CLI automates the manual inline smoke flow. The GET-only conversation inspection CLI also verifies existing request/result envelopes; it does not generate tables or triggers, invoke a bot, deploy an app, or validate domain geometry. See [conversation-worker.md](conversation-worker.md) for the independently tested implementation pattern and its remaining boundaries.

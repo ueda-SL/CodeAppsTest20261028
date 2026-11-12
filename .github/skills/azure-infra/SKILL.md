@@ -1,0 +1,125 @@
+---
+name: azure-infra
+description: "Azure の基盤（ネットワーク・ID・ストレージ・コンピュート・デプロイ）をリファレンスアーキテクチャから選定し、テナントのセキュリティガバナンスに準拠した構成で構築・デプロイ・検証する。組織ポリシー（公衆ネットワークアクセス禁止・共有キー禁止・MFA 必須等）の下でも動作する構成を、Private Link / Managed Identity / VNet 統合を用いて実装する。"
+category: architecture
+triggers:
+  - "Azure 構築"
+  - "Azure リファレンスアーキテクチャ"
+  - "Private Endpoint"
+  - "publicNetworkAccess"
+  - "共有キー禁止"
+  - "Managed Identity でストレージ"
+  - "VNet 統合 Functions"
+  - "テナント準拠 Azure"
+  - "ストレージを Web で使う"
+  - "セキュアな Web サイト"
+  - "linked backend"
+  - "Azure ガバナンス準拠"
+---
+
+# Azure 基盤（azure-infra）スキル
+
+Azure 開発を、**テナントのセキュリティガバナンスに準拠**したまま進めるためのスキル。
+要件から適切なリファレンスアーキテクチャを選定し、構築・デプロイ・検証・クリーンアップまでを一貫して行う。
+
+> **原則**: 組織ポリシー（Azure Policy / Conditional Access）と戦わず、**準拠する構成**を採る。
+>
+> **担当範囲**: 基盤（VNet / Private Endpoint / Managed Identity / RBAC / デプロイ経路）を扱う。
+> Azure の個別サービスを使うアプリ側の実装（MCP Server、データ基盤、音声認識など）は各専門スキルが持ち、基盤部分だけをこのスキルに委譲する。
+> `publicNetworkAccess=Disabled` でも Private Link は常に到達可能——これを土台にする。
+
+## Step 0: 事前確認（会話の最初に 1 回だけ）
+
+本スキルの利用が確定したら、[standard の共通契約](../standard/SKILL.md#共通の事前確認契約会話の最初に-1-回だけ)に加え、
+**1 回の AskUserQuestion で次をまとめて確認する**。
+
+| # | 質問 | 合格条件 |
+|---|---|---|
+| 1 | 対象 subscription、resource group、region、予算はどれか | 実装先と課金上限、作成 / 削除の承認範囲が確定している |
+| 2 | リソース作成と RBAC 割り当ての担当者は誰か | リソース作成は対象 scope の `Contributor` 相当、role assignment は `Role Based Access Control Administrator` / `User Access Administrator` / `Owner` の担当者を記録している |
+| 3 | 適用される Azure Policy と Conditional Access は何か | public network、shared key、allowed regions / SKUs、private endpoint、MFA の制約を確認している |
+| 4 | ネットワーク変更の担当者は誰か | VNet、subnet、Private DNS、private endpoint に必要な権限と既存ネットワーク所有者の承認がある |
+| 5 | デプロイ経路とシークレット管理は何か | Managed Identity / workload identity、Key Vault、CI runner のネットワーク到達性を確定している |
+| 6 | 検証とクリーンアップを誰が行うか | security test、cost確認、削除期限、保持対象を記録している |
+
+広い `Owner` を既定にせず、リソース作成と role assignment を分離する。
+Policy、MFA、Private DNS のいずれかが不明なら Step 4 の構築へ進まない。
+
+## リファレンスアーキテクチャ一覧（メニュー）
+
+| リファレンス | 用途 | ドキュメント |
+|---|---|---|
+| セキュアな Web × ストレージ | 公衆アクセス禁止ストレージのコンテンツを Web で安全配信 | [references/secure-website.md](references/secure-website.md) |
+| Microsoft Foundry エージェント | Web 組み込みエージェント / 知識グラウンディング(Work IQ・Foundry IQ・Fabric IQ) / AI Gateway ガバナンス | [references/foundry-agent.md](references/foundry-agent.md) |
+| MCP Server（Azure Functions） | 社内データを Copilot Studio エージェントへ公開する自前 MCP Server | [mcp-server スキル](../mcp-server/SKILL.md) |
+| 短期トークン発行（トークン ブローカー） | ブラウザから Azure サービスへ直結する（WebSocket 等）ための短期トークンを、Managed Identity で発行してカスタム コネクタ経由で渡す | [references/token-broker.md](references/token-broker.md) |
+
+> 新しいリファレンスは `references/<topic>.md` として追加し、この表と参考リンクに1行足す。
+
+---
+
+## Web サイトの UI / デザインの参照方針
+
+Azure 上で Web サイト/フロントを作る際、UI は**新規に定義せず、この開発標準の共通デザイン言語と既存実装を参照**する。
+
+| 対象 | 参照先 |
+|---|---|
+| **デザイン言語（トークン/配色/UX選定）** = 単一ソース | [standard: デザイン言語](../standard/references/design-language.md) |
+| **内部向け業務システム**の実装（React / shadcn/ui + Tailwind v4） | [code-apps デザインパターン](../code-apps/references/design-pattern.md) / [テンプレート](../code-apps/references/design-templates.md) |
+| **外部向けポータル / 公開サイト**の実装 | [power-pages デザインパターン](../power-pages/references/design-pattern.md) / [テンプレート](../power-pages/references/design-templates.md) |
+
+> 配色/トークンは **standard のデザイン言語**を単一ソースとする。用途（内部業務 or 外部公開）で参照する実装を切り替える。
+> Web 配信のセキュア構成は [references/secure-website.md](references/secure-website.md) を併用する。
+
+### Azure 固有の UI 適応メモ（独自パレットは持たない）
+- **フォント/CSP**: Azure(SWA/App Service) は Code Apps の「Google Fonts 禁止/フォント固定」制約が**無い**。カスタム Web フォント/可変フォントを使用可。
+- **モーション/SEO/パフォーマンス**: 公開サイトではアニメーション・メタ/OGP・Core Web Vitals 最適化等、内部業務基準を超えた要素を採り入れてよい。
+- **公開マーケ/LP 系**: デザインはホスティング非依存のため [power-pages](../power-pages/references/design-pattern.md) のパターンを流用する。
+
+---
+
+## ワークフロー（正常系）
+
+### Step 1: リファレンスアーキテクチャを選定する
+1. ユーザー要件を確認し、上のメニューから該当リファレンスを選ぶ。
+2. 該当が無ければ、要件に近い構成を `references/` から選び、差分を明示する。
+
+### Step 2: 事前確認で「Sure」にする
+1. [references/preflight-checklist.md](references/preflight-checklist.md) を上から確認する。
+2. 特に **強制ポリシーの対象リソース型**（ストレージのみか、コンピュートも含むか）を確定し、公開バックエンド可否を判断する。
+3. **公式仕様は Microsoft Learn MCP**（`microsoft_docs_search` / `microsoft_docs_fetch`）で裏取りし、推測を残さない。
+
+### Step 3: MFA 認証済みセッションを確保する
+1. 組織が ARM 書込に MFA を要求する場合、`scripts/ensure_az_mfa.ps1` で MFA 済みトークンを確保する。
+2. トークンの `amr` に `mfa`/`rsa` が含まれることを確認（`amr=pwd` は未 MFA で書込不可）。
+
+### Step 4: インフラを段階構築する
+1. `scripts/setup_private_endpoint.ps1` を **段階（Stage）実行**する（ポリシーでの失敗を切り分けるため）。
+2. VNet/サブネット → Private DNS → Private Endpoint → バックエンドストレージ → コンピュート（VNet 統合・**MI デプロイ認証を作成時に指定**）→ RBAC → アプリ設定 → フロント連携 の順。
+3. パラメータは引数か `.env`（[references/.env.example](references/.env.example)）から取得する。
+
+### Step 5: アプリをデプロイする
+1. **企業ネットワークからの大容量デプロイはリセットされる**ため、CI からデプロイする（`scripts/deploy_functionapp.yml`）。
+2. コンテンツ配信はブラウザ直アクセスをやめ、**API プロキシ（HTTP Range 対応）**に変更する（詳細は各リファレンス）。
+
+### Step 6: 検証する
+1. 未認証で保護エンドポイントが `401` を返す（配信・認証保護の確認）。
+2. 認証後にデータ取得が `200`（**Private Endpoint 経由の読取成功**）。
+3. コンテンツは Range 要求に `206` + `Content-Range` を返す。
+4. [ブラウザ自動化方針](../standard/references/browser-automation.md)に従い、起動前に
+  `AskUserQuestion` で Edge プロファイルを確認してから、ブラウザ E2E を
+  **VS Code 統合ブラウザ**で自動化する（Playwright 単体・MCP は使わない）。
+
+### Step 7: クリーンアップとセキュリティ
+1. 旧「公開切替」自動化（Automation runbook / スケジュール / CI）は不要かつ無効のため削除する。
+2. シークレットは env / Key Vault 参照で管理し、コミットしない。一時ファイル・認証キャッシュは `.gitignore`。
+3. 露出したシークレットはローテーションする。
+
+---
+
+## 参考リンク
+- [セキュアな Web × ストレージ構成](references/secure-website.md)
+- [Microsoft Foundry エージェント開発](references/foundry-agent.md)
+- [事前確認チェックリスト](references/preflight-checklist.md)
+- [異常系・トラブルシュート](references/troubleshooting.md)
+- [パラメータ定義（.env.example）](references/.env.example)

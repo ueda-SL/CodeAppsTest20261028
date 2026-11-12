@@ -1,0 +1,385 @@
+---
+name: copilot-studio
+description: "Copilot Studio Standard エージェントを承認付き private API で初回プロビジョニングし、設定・外部トリガー追加・ニュース配信エージェント等を構築する。生成オーケストレーション（Generative Orchestration）モード一択。"
+category: automation
+triggers:
+  - "Copilot Studio"
+  - "エージェント作成"
+  - "生成オーケストレーション"
+  - "Instructions"
+  - "指示"
+  - "ナレッジ"
+  - "MCP Server"
+  - "PvaPublish"
+  - "ボット設定"
+  - "エージェント公開"
+  - "Copilot Studio トリガー"
+  - "メール受信"
+  - "エージェント自動起動"
+  - "ExecuteCopilot"
+  - "Power Automate トリガー"
+  - "Office 365 Outlook"
+  - "メールトリガー"
+  - "自動リサーチ"
+  - "レポート自動生成"
+  - "RSS"
+  - "Web検索"
+  - "定期配信"
+  - "スケジュールトリガー"
+  - "Work IQ MCP"
+  - "ニュースエージェント"
+  - "外部公開"
+  - "Web埋め込み"
+  - "認証なし"
+  - "静的Webサイト"
+  - "WebChat SDK"
+  - "デザインテンプレート"
+  - "外部Webデザイン"
+  - "ランディングページ"
+---
+
+# Copilot Studio エージェント構築スキル
+
+Copilot Studio エージェントを **生成オーケストレーション（Generative Orchestration）モード一択** で構築する。
+外部トリガー・ニュース配信エージェント等の応用パターンまでカバーする統合スキル。
+
+> **環境診断は明示依頼時・障害時だけ**。通常は構築を開始し、環境・DLP の事前確認を挟まない。
+> ポリシー関連の拒否が発生したら [admin の権限確認付き復旧](../admin/references/development-recovery.md) に従う。
+> 現在の委任権限で可能な診断・承認済み最小修復・限定リトライを行い、権限不足なら管理者へ依頼する。
+
+## サブリファレンス（必要に応じて参照）
+
+| リファレンス | 内容 |
+|---|---|
+| [admin スキル（環境・DLP チェック）](../admin/SKILL.md) | 明示依頼時・障害時だけの権限確認付き診断・修復 |
+| [構築リファレンス](references/build-reference.md) | 構築手順の詳細・Instructions テンプレート・スクリプトコード |
+| [**外部公開 WebChat SDK（標準）**](references/webchat-sdk-embed.md) | **外部公開の標準パターン**。BotFramework WebChat SDK で UI フルカスタマイズ・プログラム的メッセージ送信 |
+| [**外部公開デザインテンプレート（標準 UI）**](references/webchat-sdk-design-template.md) | **標準 UI デザイン**：左パネル（カテゴリ別カード＋プロンプトチップス）＋ 右 WebChat パネル（グラデーション枠・AI タイピング Tips） |
+| [**ライトモード・テンプレート集**](references/webchat-sdk-light-templates.md) | **ライトモード 5 レイアウト**（workspace / minimal / hero-cards / dashboard / sidebar）＋ 全テンプレート標準の**「新しい会話（初期化）」ボタン**（React 再マウント対策 `freshWebchatEl()`） |
+| [外部公開 手動認証（SSO）](references/webchat-sdk-manual-auth.md) | Entra ID サインイン必須＋**ユーザー権限で Dataverse アクセス（RLS/OBO）**。2 アプリ登録・FIC（シークレットレス）・OAuth カードの silent トークン交換 |
+| [外部公開 iframe（レガシー・非推奨）](references/external-web-embed.md) | iframe で埋め込む簡易版。UI カスタマイズ不可のため**標準では使わない**。動作確認・PoC 用のみ |
+| [外部トリガー](references/trigger.md) | メール受信・Teams メッセージ・スケジュール等のトリガー追加 |
+| [Standard MCP tool](references/standard-mcp-tools.md) | UI観測済みprivate APIによる承認付きMCP追加とread-back |
+| [Standard model selection](references/model-selection.md) | GPT component YAMLのモデル値をETag・SHA-256・承認plan付きで変更 |
+| [トリガーパターン](references/trigger-patterns.md) | トリガーの設定パターン集 |
+| [トラブルシューティング](references/troubleshooting.md) | トリガー関連を中心とした異常系・トラブルシューティング |
+| [ニュース配信エージェント](references/market-research-report.md) | RSS + Web検索 + Work IQ MCP によるニュース収集・配信エージェント構築 |
+| [ニュース配信デプロイガイド](references/market-research-deployment-guide.md) | ニュース配信エージェントのデプロイ手順 |
+| [ニュース配信メールテンプレート](references/market-research-email-template.md) | ニュース配信メールの HTML テンプレート |
+| [トランスクリプト分析](references/transcript-analytics.md) | 会話トランスクリプトの分析パターン（ボット識別・ユーザー識別） |
+
+## 事前確認（会話の最初に 1 回だけ）
+
+本スキルの利用が確定したら、[standard の共通契約](../standard/SKILL.md#共通の事前確認契約会話の最初に-1-回だけ)に加え、
+**1 回の AskUserQuestion で次をまとめて確認する**。
+
+| # | 質問 | 合格条件 |
+|---|---|---|
+| 1 | v1 が必要な利用形態か | Code Apps 連携、WebChat、外部トリガー等の v1 採用理由が明確である |
+| 2 | 対象環境で作成・公開できるか | Copilot Studio の必要ライセンス / capacity と maker / publish 権限がある |
+| 3 | channel と audience は何か | Teams / M365 Copilot / Web、internal / external / anonymous、公開担当者が確定している |
+| 4 | 認証とデータアクセスは何か | Microsoft 認証 / manual auth / none、Dataverse RLS、接続所有者を承認済みである |
+| 5 | knowledge、MCP、trigger、外部文章を使うか | 接続権限、送信データ、prompt injection 対策、実害操作の確認方法が確定している |
+| 6 | エージェント設計とテスト範囲は承認済みか | Instructions、モデル、ツール、アイコン、テストユーザー、期待応答を記録している |
+
+外部公開で `AGENT_AUTH_MODE=none` を使う場合は、匿名アクセスで公開してよいデータと操作を
+明示承認する。ライセンス、認証方式、公開対象のいずれかが未確認なら公開しない。
+
+## 外部公開 Web サイト開発フロー（必須）
+
+**外部公開は WebChat UI（BotFramework WebChat SDK）を標準とする。** iframe 埋め込みは
+UI カスタマイズができないためレガシー扱いとし、PoC・動作確認以外では使わない。
+
+**WebChat UI のデザインは既存のデザインテンプレートを再利用する**
+（新規にゼロからデザインを起こさない）:
+
+- 標準（ダーク UI）: [webchat-sdk-design-template.md](references/webchat-sdk-design-template.md)
+- ライトモード / 複数レイアウト: [webchat-sdk-light-templates.md](references/webchat-sdk-light-templates.md)
+
+フロー:
+1. **前提**: エージェントを「認証なし」で公開しておく
+   （[set_agent_security.py](scripts/set_agent_security.py) を `AGENT_AUTH_MODE=none` で実行 → 公開）。
+   WebChat SDK は「認証なし」エージェントの DirectLine トークンで匿名接続する。
+2. 既存デザインテンプレートのレイアウト構成 + カテゴリ/プロンプト案をユーザーに提示
+3. ユーザー承認
+4. `website/index.html` を**既存テンプレートベース**で実装（WebChat SDK 埋め込み）
+5. カテゴリ・プロンプト・Tips・カラーを案件に合わせて調整
+6. `py scripts/deploy_website.py` で Azure Storage にデプロイ
+
+> ⚠️ 「認証なし」の設定は [構築リファレンスの Step 7-8](references/build-reference.md) の
+> 3 スクリプト分離フロー（構築 → セキュリティ → チャネル）に従うこと。認証モードを設定せず
+> 公開すると UI 既定の **Microsoft 認証** になり、WebChat SDK が匿名接続できない。
+
+## 前提: 設計フェーズ完了後に構築に入る（必須）
+
+**エージェントを構築する前に、エージェント設計をユーザーに提示し承認を得ていること。**
+
+設計提示時に含める内容:
+
+| 項目                     | 内容                                                                          |
+| ------------------------ | ----------------------------------------------------------------------------- |
+| エージェント名・説明     | 名前と役割の説明                                                              |
+| Instructions             | 指示テキストの全文案                                                          |
+| 推奨プロンプト           | 3〜5 個のタイトル＋プロンプト文（GPT コンポーネントの conversationStarters）  |
+| 会話の開始のメッセージ   | エージェントに合った挨拶テキスト（ConversationStart トピックの SendActivity） |
+| 会話の開始のクイック返信 | 3〜5 個のクイック返信テキスト（ConversationStart トピックの quickReplies）    |
+| ナレッジ                 | データソース（Dataverse テーブル / SharePoint / ファイル等）                  |
+| ツール                   | MCP Server の接続先・用途                                                     |
+| チャネル公開設定         | 簡単な説明・詳細な説明・背景色・開発者名（デフォルト値を提案）                |
+
+```
+フロー: 設計提示 → ユーザー承認 → アイコン画像提案 → ユーザー選択 → UI で Bot 作成 → スクリプトで設定適用
+```
+
+## アイコン画像提案（設計承認後・構築前）
+
+> **アイコンの設計・生成・登録の詳細は `standard` スキルの [アイコン作成リファレンス](../standard/references/icon-creation.md) を参照。**
+> ここではエージェント固有の手順のみ記載する。
+
+エージェント設計が承認されたら、**Bot 作成前にアイコン画像を提案**する。
+`standard` スキルの [アイコン作成リファレンス](../standard/references/icon-creation.md) のアイコン画像提案フローに従い、3〜4 パターンを提案 → ユーザー選択 → PNG 3 サイズ生成（240, 192, 32）→ `bots.iconbase64` + Teams マニフェストに API 登録。
+
+## 大前提: 一つのソリューション内に開発
+
+Dataverse テーブル・Code Apps・Power Automate フロー・Copilot Studio エージェントは **すべて同一のソリューション内** に含める。
+
+```
+SOLUTION_NAME=SampleSolution  ← .env で定義。全フェーズで同じ値を使用
+PUBLISHER_PREFIX=geek              ← ソリューション発行者の prefix
+```
+
+- API ヘッダーに `MSCRM.SolutionName: {SOLUTION_NAME}` を付けることでソリューション内に作成
+
+> **認証**: Python スクリプトの認証は `standard` スキルの `auth_helper.py` を使用。
+> `from auth_helper import get_token, get_session, api_get, api_post, api_patch` で利用する。
+
+- Bot 作成時（Copilot Studio UI）は「エージェント設定」でソリューションを明示的に選択
+- ソリューション外で作成したコンポーネントはリリース管理・環境間移行ができない
+
+## 必須要件
+
+### ツールにする Power Automate フローは `kind: VirtualAgent`（★ 検証済み教訓 2026-10-09）
+
+エージェントのツールとして追加する Power Automate フローは、
+トリガー・応答ともに `kind: "VirtualAgent"` でなければならない。
+
+```
+❌ トリガー "kind": "PowerAppV2" / 応答 "kind": "PowerApp"
+   → フローのデプロイ・有効化は成功し Power Automate UI にも出るが、
+     「ツールを追加 → フロー」の一覧に**一切表示されない**
+
+✅ トリガー {"type": "Request",  "kind": "VirtualAgent"}
+✅ 応答     {"type": "Response", "kind": "VirtualAgent"}
+```
+
+```
+応答 schema は PowerApp 応答と形式が違う:
+  ✅ プロパティは title + x-ms-dynamically-added のみ
+  ❌ x-ms-content-hint / additionalProperties は付けない
+
+★ フローを再デプロイすると workflow ID が変わる
+  → 追加済みのツールは参照切れになるので削除 → 再追加する
+```
+
+> 実装の詳細は [power-automate スキルの trigger-action-patterns.md](../power-automate/references/trigger-action-patterns.md)
+> 「Copilot Studio トリガー（VirtualAgent）」を参照。
+
+### Bot 作成は観測済みcontractで承認付き自動化
+
+```
+❌ name / schemanameだけの Dataverse bots INSERT
+   → PVA Bot Management Service にプロビジョニングされない
+   → Copilot Studio UI で「エージェントの作成中に問題が発生しました」エラー
+   → botroutinginfo が 404 になる
+
+✅ scripts/provision_agent.py plan でUI観測済みcontractとSHA-256を生成
+✅ 承認したhashでapplyし、template/configuration/iconを含むPOSTを1回だけ実行
+✅ componenttype 9（topic）と15（GPT）のread-back後に設定変更へ進む
+```
+
+### GPT コンポーネント（componenttype=15）の扱い
+
+1. **UI が作成したコンポーネントを特定して更新する**
+   - `bots(id)?$select=configuration` → `configuration.gPTSettings.defaultSchemaName` で UI コンポーネントの schemaname を取得
+   - API で新しい GPT コンポーネントを INSERT すると UI と API で別々のコンポーネントが存在し、UI は自分のコンポーネントしか読まない
+
+2. **configuration を PATCH する際は既存値をディープマージする**
+   - `configuration` を丸ごと上書きすると `gPTSettings.defaultSchemaName` やモデル設定が消える
+   - 必ず GET → ディープマージ → PATCH
+   - `optInUseLatestModels` は明示的に `False` を設定 — `True` だと UI で選択した基盤モデル（Claude Sonnet 等）が GPT に強制変更される
+   - `aISettings` も丸ごと上書きせずディープマージで既存のモデル選択を保持
+
+3. **余分な GPT コンポーネントは削除する**
+   - `componenttype eq 15` で全取得 → `defaultSchemaName` と一致するものを UI コンポーネントとして特定 → それ以外を削除
+
+### 指示（Instructions）の YAML 形式 — PVA ダブル改行フォーマット
+
+PVA パーサーは標準 YAML のシングル改行 (`\n`) を**構造行**として認識しない。
+YAML の**構造行**（kind, displayName, conversationStarters 等）はダブル改行 (`\n\n`) で区切る必要がある。
+ただし `instructions: |-` ブロック内のテキストはシングル改行で記述する。
+
+```python
+# ✅ 正しい構築方法
+def _build_gpt_yaml():
+    # instructions ブロック（シングル改行）
+    inst_block = "\n".join(f"  {line}" for line in GPT_INSTRUCTIONS.splitlines())
+
+    # conversationStarters（ダブル改行）
+    starter_lines = []
+    for p in PREFERRED_PROMPTS:
+        starter_lines.append(f"  - title: {p['title']}")
+        starter_lines.append(f"    text: {p['text']}")
+    starters_block = "\n\n".join(starter_lines)
+
+    return (
+        "kind: GptComponentMetadata\n\n"
+        f"displayName: {BOT_NAME}\n\n"
+        f"instructions: |-\n{inst_block}\n\n"
+        f"conversationStarters:\n\n{starters_block}\n\n"
+    )
+```
+
+```
+❌ yaml.dump() → PVA パーサーと非互換
+❌ 全行シングル改行 → conversationStarters / quickReplies が UI に反映されない
+❌ 全行ダブル改行 → instructions テキストが空行だらけになる
+❌ conversationStarters の title/text をダブルクォートで囲む → PVA に反映されない
+✅ 構造行はダブル改行、instructions ブロック内はシングル改行
+✅ conversationStarters の title/text はクォートなし
+✅ displayName キーを含める（UI が表示に使用）
+✅ instructions 内で単一波括弧 {変数名} を使わない → PVA が Power Fx 式として解釈し IdentifierNotRecognized エラー。自然言語で記述する
+```
+
+### ConversationStart トピックの YAML 形式
+
+ConversationStart トピック（componenttype=9）も同じダブル改行フォーマット。
+
+```python
+lines = []
+lines.append("kind: AdaptiveDialog")
+lines.append("beginDialog:")
+lines.append("  kind: OnConversationStart")
+lines.append("  id: main")
+lines.append("  actions:")
+lines.append("    - kind: SendActivity")
+lines.append(f"      id: {send_id}")
+lines.append("      activity:")
+lines.append("        text:")
+lines.append(f"          - {greeting_text}")  # クォートなし
+lines.append("        speak:")
+lines.append(f'          - "{greeting_text}"')
+lines.append("        quickReplies:")
+for qr in QUICK_REPLIES:
+    lines.append(f"          - kind: MessageBack")
+    lines.append(f"            text: {qr}")
+# ダブル改行で結合
+new_data = "\n\n".join(lines) + "\n\n"
+```
+
+```
+❌ シングル改行 → 送信ノードが消え、quickReplies が UI に反映されない
+❌ 挨拶テキストに生改行 \n を含める → YAML が壊れる（スペースに置換する）
+✅ 全行ダブル改行で結合
+✅ actions 配下は 4 スペースインデント
+```
+
+### 基盤モデル選択（aISettings）
+
+PVA は GPT コンポーネントの `data` YAML 末尾に基盤モデル情報を格納する:
+
+```yaml
+aISettings:
+  model:
+    modelNameHint: Sonnet46
+```
+
+GPT コンポーネントの `data` を上書きすると、この `aISettings` セクションが消えて
+デフォルトモデル（GPT 4.1）に戻る。モデル変更は`set_model.py`でplanを作り、承認したhashだけをapplyする。
+
+```powershell
+python scripts/set_model.py show --bot-id $env:BOT_ID
+python scripts/set_model.py plan --bot-id $env:BOT_ID --model $env:AGENT_MODEL_NAME
+python scripts/set_model.py apply --expected-hash <承認したSHA-256>
+```
+
+```
+❌ GPT data を丸ごと上書き → 基盤モデルがデフォルトに戻る
+❌ componentが複数あるときに先頭を更新 → UI所有componentとずれる
+✅ configuration.gPTSettings.defaultSchemaNameで所有componentを特定。無い場合はGPT componentが1件のときだけ続行
+✅ 元YAML hashとETagを承認planへ束縛し、modelNameHint以外を保持
+✅ PATCH後にYAML全体hashとmodelNameHintをread-back。反映には再公開が必要
+```
+
+### 説明（Description）の保存場所
+
+```
+❌ YAML 内の description キー → UI が読まない
+❌ bot エンティティの description プロパティ → 存在しない
+✅ botcomponents テーブルの description カラム
+
+注意: data PATCH の非同期処理が description を上書きする
+→ 対策: publish 後に description を別途 PATCH する
+```
+
+
+## 構築手順
+
+詳細な構築手順・スクリプトコードは [構築リファレンス](references/build-reference.md) を参照。
+
+> **設計承認と同時に並行着手（VS Code サブエージェント）**: Phase 1 の設計承認後、Dataverse 構築を待たずに
+> 本トラック（Copilot Studio）を**並行して開始**できる。VS Code では Copilot Studio サブエージェントとして起動する。
+> **先行工程（テーブル不要）** = Bot 作成 → 生成オーケストレーション有効化 → Instructions 設定（Step 0–4）は
+> Dataverse 構築と完全に並行で進められる。以下は Dataverse／Power Automate の完了を待つ**同期点**:
+> - **★同期①（テーブル作成完了後）** — Dataverse をソースにするナレッジ／MCP の追加（Step 9）。
+> - **★同期②（フロー作成完了後）** — Power Automate フローをツール化する連携。
+>
+> 全体のトラック分割・オーケストレーションは [standard §8「開発フロー全体図」](../standard/references/power-platform-development-standard.md#8-開発フロー全体図) を参照。
+
+高レベルの手順:
+
+1. **Step 0**: `provision_agent.py`でplan生成・hash承認・Botプロビジョニング
+2. **Step 1-1.5**: Bot 検索 + プロビジョニング完了待ち
+3. **Step 2**: カスタムトピック削除（システムトピック保護）
+4. **Step 3**: 生成オーケストレーション有効化
+5. **Step 4**: `set_model.py`でmodel plan生成・hash承認・apply
+6. **Step 5-5.5**: Instructions + 会話の開始設定
+7. **Step 6-7**: エージェント公開 + 説明設定（`deploy_agent.py` はここまで）
+8. **Step 8**: セキュリティ（認証モード）設定 → 公開（`set_agent_security.py`）
+9. **Step 9**: チャネル選択（Web/Teams/Copilot）→ 公開（`set_agent_channels.py`）
+10. **Step 10**: Standard MCP toolを承認付きprivate APIで追加。connector tool・ナレッジ・トリガーは各contractに従う
+
+> **⚠️ 「公開」処理は 3 スクリプトに分離する（一体化禁止）**
+>
+> セキュリティ設定 → 公開 → チャネル選択 → 公開 を 1 本のスクリプトにまとめると、
+> 認証モードを設定し忘れて UI 既定の **Microsoft 認証** で公開され、Web 埋め込みができなくなる。
+> 必ず以下の順で実行する:
+>
+> | 順 | スクリプト | 役割 | 主な .env |
+> |---|---|---|---|
+> | 1 | `provision_agent.py` | 承認付き初回プロビジョニング | `AGENT_NAME`, `BOT_SCHEMA`, `AGENT_LANGUAGE`, `SOLUTION_NAME` |
+> | 2 | `set_model.py` | 承認付き基盤モデル設定 | `BOT_ID`, `AGENT_MODEL_NAME` |
+> | 3 | `deploy_agent.py` | 構築（Instructions等）＋公開 | `BOT_ID` または `AGENT_NAME` |
+> | 4 | `set_agent_security.py` | 認証モード設定→公開 | `AGENT_AUTH_MODE`（`none` / `microsoft`） |
+> | 5 | `set_agent_channels.py` | チャネル選択→公開 | `AGENT_CHANNELS`（`web,teams,copilot`） |
+>
+> Copilot Studio v1 の `bots.authenticationmode`: `1`=認証なし（Web 埋め込み必須）／`2`=Microsoft で認証（UI 既定・Teams）。
+> 認証変更は**公開後に反映**される。
+
+Instructions テンプレート・既存エージェント改善パターンは [構築リファレンス](references/build-reference.md#instructions-テンプレート) を参照。
+
+## .env 必須項目
+
+全パラメータの定義（取得元コメント付き）は [references/.env.example](references/.env.example) を参照。
+実値はリポジトリルートの `.env` に置く（`.gitignore` 済み）。
+
+```env
+DATAVERSE_URL=https://{org}.crm.dynamics.com/
+SOLUTION_NAME=SolutionName
+PUBLISHER_PREFIX=prefix
+AGENT_NAME=AgentName
+AGENT_LANGUAGE=1041
+BOT_SCHEMA=prefix_AgentName
+BOT_ID=https://copilotstudio.../bots/xxxxxxxx-xxxx-.../overview
+# ↑ Copilot Studio URL をそのまま貼り付け可。GUID だけでも OK
+AGENT_MODEL_NAME=Sonnet46
+```

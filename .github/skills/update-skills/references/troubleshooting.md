@@ -1,0 +1,352 @@
+# update-skills — 異常系・トラブルシュート
+
+## 1. `validate_skill.py` がフォルダ名不一致を報告する
+- 原因: frontmatter `name` とスキルフォルダ名が違う（kebab-case 不一致を含む）。
+- 対処: どちらかを合わせる。`name` は小文字英数とハイフンのみ、先頭/末尾/連続ハイフン禁止。
+
+## 2. Step 番号の連番エラー（飛び・重複）
+- 原因: 見出しが `### Step 0:` `### Step 2:` のように飛んでいる、または重複している。
+- 対処: `Step 0` から連続する整数に振り直す。番号は**整数のみ**（`Step 2.5` のような小数は不可）。
+- 補足: validator は `## Step N` / `### Step N` の見出しを対象にする。小数や全角数字はヒットしない。
+
+## 3. 秘匿情報スキャンがヒットする
+- 検出例: 36 桁 GUID、`*.crm*.dynamics.com` の実 URL、`@`付き実メール、`*~*`（クライアントシークレット様）。
+- 対処: プレースホルダーに置換する（`{your-tenant-id}` / `https://<org>.crm.dynamics.com` / `admin@example.com`）。
+- 例外: 公式ドキュメントの well-known なシステム GUID（例: Dynamics CRM の `00000007-0000-0000-c000-000000000000`）は
+  許可リストに入っている。誤検出が出た場合は `validate_skill.py` の `ALLOWLIST` に追記する。
+
+## 4. `manage_skill_pr.py` が `gh` を見つけられない
+- 原因: GitHub CLI が PATH に無い、または未認証。
+- 対処: `gh auth status` を確認。Windows では PATH 追加が必要なことがある
+  （例: `$env:PATH = "C:\Program Files\GitHub CLI;$env:PATH"`）。
+
+## 5. オープン PR を更新したら push が rejected される
+- 原因: リモートブランチが先に進んでいる（他者のコミット）。
+- 対処: `git fetch origin && git rebase origin/<branch>`（または `git pull --rebase`）してから push。
+  強制 push（`--force`）は共有ブランチでは避け、必要時は `--force-with-lease` を使い、事前に確認を取る。
+
+## 6. 新規 PR が既存 PR とコンフリクトした
+- 原因: 同じ集約ファイル（README カタログ等）を両方が編集している。
+- 対処: [pr-strategy.md](pr-strategy.md) のケース 3 に従い、先行 PR をマージ後にリベース。
+  そもそも集約ファイルの編集は最小行に留める。
+
+## 7. Learn MCP が使えない環境 / ブラウザ操作は Playwright MCP を使わない
+- Learn MCP 不在: `microsoft_docs_search` が無ければ Web 取得にフォールバックしつつ、出典 URL を残す。
+- ブラウザ操作は常に **VS Code 統合 Playwright ブラウザ**（`playwright-browser_navigate` / `playwright-browser_click` /
+  `playwright-browser_snapshot` / `playwright-browser_type` / `playwright-browser_handle_dialog`）を使う。Playwright MCP サーバー・Playwright 単体ブラウザは
+  インストール・起動しない（→ [ブラウザ自動化方針](../../standard/references/browser-automation.md)）。
+  統合ブラウザツールが提供されていない環境のみ、ブラウザ手順を手動手順として書き、
+  画面パス・ボタン名・入力値を具体的に明記して後で自動化に置換できる粒度で残す。
+- ブラウザを開く前に `AskUserQuestion` で Microsoft Edge プロファイルを確認し、回答前は
+  起動・遷移・認証を開始しない。同一タスクでは選択したプロファイルを継続利用する。
+- `validate_skill.py` はブラウザ起動を示す Markdown に `AskUserQuestion` または
+  `browser-automation.md` の参照が無い場合にエラー終了する。
+
+## 8. push 直前スキャンでシークレットが見つかった
+- 即中止。コミット済みなら `git restore --staged` / 履歴に入っていれば該当コミットを作り直す。
+- `.env` がステージされていないか（`.gitignore` 済みか）を必ず確認する。
+
+## 9. `validate_skill.py` が Windows コンソールで `UnicodeEncodeError`（❌ 等）
+- 原因: 既定コンソールが cp932 で、絵文字マーカーを出力できない。
+- 対処: スクリプトは `sys.stdout.reconfigure(encoding="utf-8")` を試み、失敗時は `[NG]`/`[WARN]`/`[OK]` の
+  ASCII マーカーに自動フォールバックするため、そのまま動く。明示的に UTF-8 化したい場合は
+  `$env:PYTHONIOENCODING="utf-8"` を設定する。
+
+## 10. `@odata.bind` 等が「実メールらしき値」として誤検出される
+- 原因: `parentbotid@odata.bind` のような OData アノテーションが `@` を含む。
+- 対処: validator は `@odata.` / `@microsoft.` / `@xmlns.` と `noreply.github.com` を許可リストで除外する。
+  別パターンの誤検出は `validate_skill.py` の `NON_EMAIL_RE` / `EMAIL_ALLOW` に追記する。
+
+## 11. `publish_skill.py` の clone 先で commit が `please tell me who you are`
+- 原因: 新規 clone には git identity（user.name / user.email）が未設定。
+- 対処: `publish_skill.py` は `gh api user` のログインから identity を解決して
+  `git -c user.name=... -c user.email=...` でコミットするため通常は自動解決する。
+  手動でクローンした場合は `git config user.name` / `git config user.email` を設定してからコミットする。
+
+## 12. `publish_skill.py` の使い方メモ
+- 必須: `.env` に `SKILL_PR_REPO`（owner/repo）。`gh auth status` が認証済みであること。
+- 主オプション: `--skill <name>`（必須）/ `--extra <path>`（README・agents 等の集約ファイルを同時反映、複数可）/
+  `--branch`（既定 `skill/<name>`）/ `--dry-run`（push・PR をスキップして検証のみ）。
+- 既存の同名ブランチ/PR があれば自動で更新（新規 PR を作らない）。
+
+## 13. `manage_skill_pr.py` が既存のオープン PR を「0 件」と誤検出する（`UnicodeDecodeError` がスレッド内で出る）
+### 症状
+`gh pr list` の PR タイトルに絵文字等の UTF-8 専用文字が含まれると、`subprocess.run(..., text=True)` の
+バックグラウンド読み取りスレッドで `UnicodeDecodeError: 'cp932' codec can't decode byte ...` が発生する。
+このエラーはスレッド内で表示されるだけでプロセス自体は終了コード 0 で正常終了するため、
+**気づかずに「オープン PR: 0 件 → 新規 PR で OK」という誤った判定結果を信じてしまう**（実際には
+関連するオープン PR が存在し、新規 PR を作るとコンフリクトの原因になる）。
+
+### 原因
+Windows の日本語環境では `subprocess.run(text=True)` が既定で `locale.getpreferredencoding()`（cp932）を
+使ってデコードしようとするため、UTF-8 専用の文字（絵文字等）を含む `gh` の出力でデコードに失敗する。
+
+### 恒久対策（スクリプトに実装済み）
+`manage_skill_pr.py` / `publish_skill.py` の `gh`/git 呼び出しラッパーはいずれも
+`subprocess.run(..., encoding="utf-8", errors="replace")` を明示し、cp932 起因のデコード失敗を防ぐ。
+これにより正常系（オープン PR が実際に 0 件の場合も含む）でも毎回正しくデコードされる状態になっている。
+新しく `gh`/`git` を呼び出すヘルパーを追加する場合も、必ず `encoding="utf-8"` を明示すること
+（`text=True` だけでは Windows の日本語環境で cp932 にフォールバックされ、同じ問題が再発する）。
+
+## 14. 追加した再発防止チェックが警告だらけになり、読まれなくなる
+
+### 症状
+原則「再発防止」に従って `scripts/` に静的チェックを追加したところ、実プロジェクトで
+数十件の警告が出た。ほぼ全部が問題の無い箇所で、**真の検出が埋もれてしまう**。
+
+### 原因
+パターンを広く取りすぎている。「正しく書いていてもヒットする形」を含んでいると、
+使う人は警告ごと無視するようになる。チェックが無いのと同じになる。
+
+### 対処
+- **実コードで調整する。** 追加したら必ず既存プロジェクトにかけ、
+  **真の検出だけが残るまで条件を狭める**。修正後に 0 件になるところまで確かめる。
+- 対象を限定する（例: あらゆるコンテナ → 特定の書き方をしているコンテナだけ）。
+- 警告件数に上限を設け、超えた分は件数だけ表示する。
+- 機械的に判別できないものは `errors`（失敗）にしない。警告に留める。
+
+## 15. 別ブランチへの反映のつもりが、作業中のブランチにコミットされる
+
+### 症状
+`git checkout -b <new>; git cherry-pick <sha>` のように 1 行で繋いだところ、
+`checkout` が**未コミットの変更で失敗**し、cherry-pick だけが現在のブランチで実行された。
+
+### 対処
+- PowerShell の `;` は**前のコマンドが失敗しても次を実行する**。
+  ブランチを切る操作とコミットを造る操作は**行を分け、切り替わったことを確認してから**進む。
+- 入ってしまったら `git cherry-pick --abort` → 邪魔な変更を `git stash push -- <path>` で退避
+  → 目的のブランチへ checkout → cherry-pick → `git stash pop`。
+- 既存 PR への追記は、**リモートの先端から作業ブランチを切り直して cherry-pick** するのが安全。
+  手元のブランチに無関係なコミットが混ざっていても、PR に巻き込まない。
+
+  ```powershell
+  git fetch origin
+  git checkout -B <作業名> origin/<PR のブランチ>
+  git cherry-pick <sha>
+  git push origin <作業名>:<PR のブランチ>
+  ```
+
+## 16. チェックを強化したのに、新規プロジェクトでは動かない
+
+### 原因
+スキルの `scripts/` と `templates/<name>/scripts/` のように**同じファイルが複数箇所にある**。
+手元の 1 つだけ直しても、scaffold される側には届かない。
+
+### 対処
+- 共有スクリプトを直したら、**テンプレート側にもコピーして差分 0 を確認する**。
+
+  ```powershell
+  git diff --no-index --stat .github/skills/<name>/scripts/<file> `
+    .github/skills/<name>/templates/<template>/scripts/<file>
+  ```
+
+- サンプルにも同名ファイルがある場合、全部を追従させるか、**追従させない方針を明記**する。
+  どちらでもない状態が一番危い。
+
+## 17. サンプル公開前スキャンの判断ポイント
+
+### OData バインド文字列は動的化しない
+
+テーブル名は原則 `${PUBLISHER_PREFIX}_xxx` で動的化するが、`@odata.bind` / `@odata.type` /
+`@odata.id` を含むフィールド名は Dataverse API のペイロード形式と型定義に連動するため、そのまま残す。
+プレフィックス変更時は手動置換する。`scan_sample.py` はこれらの行をテーブル名直書き検出から除外する。
+
+### システムテーブルとカスタムテーブルを区別する
+
+`bots` / `conversationtranscripts` / `systemusers` はシステムテーブルなのでプレフィックス不要。
+`{prefix}_customers` / `{prefix}_conversationsummaries` はカスタムテーブルなので動的化対象。
+Copilot Analytics 用テーブルもカスタムテーブルであり、プレフィックスを外すと参照に失敗する。
+
+### `VITE_` に秘匿情報を置かない
+
+`VITE_` 変数はビルド成果物に平文で含まれる。表示名・プレフィックス・feature flag 以外の
+トークン、パスワード、クライアントシークレットは置かない。`scan_sample.py` は
+`VITE_*SECRET/TOKEN/PASSWORD/KEY` 様の変数名を error として検出する。
+
+### ルートの除外設定を使う
+
+ルート `.gitignore` に `.env` / `power.config.json` / `.power/` / `src/generated/` を含める。
+サンプル個別の `.gitignore` は不要。スキャナーは対象から上位へ辿り、最初に見つけた
+`.gitignore` の不足を warning として報告する。
+
+### プレースホルダーを統一する
+
+`{your-tenant-id}` / `{your-environment-id}` / `https://{org}.crm.dynamics.com/` /
+`{your-bot-id}` / `{your-flow-workflow-id}` / `{your-connection-id}` / `admin@example.com` /
+`{YourProfileName}` のように、変更が必要だと分かる形式を使う。
+
+## 18. `validate_skill.py` が依存パッケージ内の GUID / 作者メールを大量検出する
+
+### 原因
+
+`node_modules`、Python仮想環境、cache等のvendored/generated filesまで再帰走査すると、package metadataの
+公開GUIDや作者メールをスキル固有の秘匿情報として誤検出する。大量の誤検出は真の漏えいを埋もれさせる。
+
+### 恒久対策（スクリプトに実装済み）
+
+`validate_skill.py`は`.git`、`.venv`、`venv`、`__pycache__`、`node_modules`を走査対象から除外する。
+スキル自身の`SKILL.md`、`references/`、`scripts/`、templates/samplesのソースは引き続き走査する。
+除外追加時は、依存物内の検出を無視するtestと、source内の同じ値を検出するtestを対で追加する。
+
+## 19. Private API captureをabortしたのにresourceが作成される
+
+### 原因
+
+UIが失敗したwrite requestを自動retryすることがある。最初のrequestをabortした直後にrouteを解除すると、
+同じ操作のretryだけがserverへ到達する。最初のrequestが失敗した表示だけでは副作用なしを証明できない。
+
+### 対策
+
+対象method/pathのrouteを維持したまま作成画面をcancelまたは離脱し、その後にrouteを解除する。
+capture後は一意name/schema/IDで不存在をread-backする。作成されていた場合は検証resourceとして記録し、
+製品のmanaged delete actionで削除後、404または0件を確認する。
+
+## 20. 単純なDataverse INSERTが失敗したため「API不可」と判断してしまう
+
+### 原因
+
+UI作成requestにはtemplate、完全なconfiguration、discriminator、既定認証値、solution header、icon等が含まれ、
+その組み合わせがserver-side provisioningを起動する場合がある。name/schemaだけのINSERT失敗は、UI contractの
+再現失敗であってAPI経路が存在しない証拠ではない。
+
+### 対策
+
+UIの正常requestをcaptureし、field単位で比較する。観測contractをstrict allowlistとしてplan化し、
+hash承認後にapplyする。HTTP成功後も子componentとruntime状態をread-backする。
+詳細は[private API 自動化標準](private-api-automation.md)を参照。
+
+## 21. スキャフォールドしたのに動かない / テンプレート変数が生のまま残る
+
+### 原因
+
+テンプレートの `${VAR}` が `.env` にも `--var` にも無く、置換されないまま書き出されていた。
+生成物は一見そろっているのに動かず、原因がテンプレート由来だと分からなくなる。
+
+似た失敗として、テンプレート内の依存が**生成ツリーの外**（Azure リソース、モデル デプロイ等）に
+あるケースがある。ファイルはすべて揃うので成功に見えるが、機能だけが無い状態で発行される。
+
+### 対策
+
+- `scaffold_from_template.py` は未解決の `${UPPER_SNAKE}` が 1 つでも残ると**1 ファイルも書かずに
+  終了する**（終了コード 3）。**恒久対策済み**: `build_plan()` の未解決トークン収集。
+- 生成ツリーの外にある依存は `scaffold.json` の `nextSteps` に書き、さらに**発行スクリプト側に
+  実在確認のプリフライト**を足す（例: `assert_image_deployment_exists()`）。
+- 事前に `--list-variables` と `--dry-run` で、必要な変数と生成計画を確認する。
+
+## 22. テンプレート変数チェックが TypeScript のテンプレートリテラルを誤検出する
+
+### 原因
+
+`templates/` 配下を無条件に走査して `${...}` を変数と見なすと、TypeScript の `` `${count}` `` や
+シェルの `${1}` まで「未宣言の変数」として大量に拾う。実測では既存 3 スキルのテンプレートで
+数百件がヒットし、真の検出が埋もれる（→ #14 と同じ構図）。
+
+### 対策
+
+`validate_skill.py` の `validate_templates()` は 2 段で絞っている。
+
+- 走査対象は `templates/<name>/scaffold.json` を**置いたテンプレートだけ**（共通スキャフォールダーで
+  配る宣言をしたもの）。マニフェストが無いテンプレートは対象外。
+- 置換対象の記法は **UPPER_SNAKE_CASE のみ**（`${AGENT_NAME}` / `__PKG__`）。
+
+この 2 条件で、全スキル一括検証（`--all`）の誤検出は 0 件になっている。
+
+## 23. 既存 PR にコミットを積んだのに、PR の説明が最初のままになっている
+
+**症状**: `publish_skill.py --branch <既存ブランチ> --title ... --body ...` を流すとコミットは push されるが、
+PR の本文は初回のまま。レビュー担当者は古い説明を読んでいる。
+
+**原因**: 既存 PR のときは push だけして、`--title` / `--body` を捨てていた。
+
+**対処**: 既存 PR でも `gh pr edit` で反映するよう修正済み。**本文はファイルで渡す**
+（PowerShell の here-string にそのまま絵文字を書くと、cp932 のコンソールで `?` に化けてから送られる）。
+
+```powershell
+$body = Get-Content "$env:TEMP\pr_body.md" -Encoding utf8 -Raw
+python .github/skills/update-skills/scripts/publish_skill.py --skill <s> --repo <owner/repo> --branch <br> --title "<t>" --body $body
+```
+
+## 24. 手元が main より古いまま公開して、他の PR の変更を巻き戻しかける
+
+**症状**: `publish_skill.py` の差分に、自分が触っていないファイルの変更が大量に出る。
+
+**原因**: `publish_skill.py` は手元のスキル フォルダーで clone 側を上書きする。手元が main より古いと、
+その間に他の PR でマージされた変更を**古い内容で上書きする差分**になる。
+
+**対処**: 公開前に main を取得して、対象外のスキルを揃える。対象スキルは main と手元の差分が
+自分の変更だけであることを確認してから出す。
+
+```powershell
+git clone --depth 1 https://github.com/<owner>/<repo>.git $env:TEMP\main_sync
+git diff --no-index --name-status .github/skills/<s> $env:TEMP\main_sync/.github/skills/<s>
+```
+
+## 25. 公開したら、他の PR が追加したフォルダーが消え、手元のビルド出力が入った
+
+**症状**: `publish_skill.py` でマージした PR の差分に、PR 先にだけあったソース 24 件の削除と、`bin/` `obj/` `publish/` の dll・exe 289 件の追加が入っていた（#24 の確認を飛ばしてマージした）。
+
+**原因**: スキル フォルダーは「消してから手元をコピー」で反映する。手元に無いだけのファイルは削除になり、
+手元に `.gitignore` が無いフォルダーのビルド出力はそのまま追加される。
+
+**対処（恒久対策済み）**: `publish_skill.py` はコミット前に staged の差分を調べ、次のどちらかがあれば止める。
+
+- `--remove` で指定していない削除（意図した削除は `--remove` で指定するか `--allow-delete`）
+- ビルド出力らしい追加（`bin` / `obj` / `publish` / `node_modules` / `dist` 配下、`.dll` / `.exe` / `.pdb` など。意図したものは `--allow-build-output`）
+
+止まったら、手元を PR 先の最新に合わせる（#24）か、対象外のフォルダーを手元から外す。
+消えてしまった場合は、マージ前のコミットからそのフォルダーを `git checkout <sha> -- <path>` で戻す PR を出す。
+
+## 26. テンプレートに GLB / HDR などの素材を足すと、生成が UnicodeDecodeError で止まる
+
+**症状**: `scaffold_from_template.py` が `'utf-8' codec can't decode byte 0xff` で終了し、何も生成されない。
+
+**原因**: バイナリの判定が拡張子の一覧（`.png` / `.zip` など）だけで、一覧に無い `.glb` / `.hdr` / `.ktx2` / `.wasm` をテキストとして読んでいた。
+
+**対処（恒久対策済み）**: `scaffold_from_template.py` の `is_binary()` が、拡張子に加えて中身（NUL バイト・UTF-8 として読めない）でも判定し、バイナリはそのままコピーする。`tests/test_scaffold_from_template.py` の `test_copies_unknown_binary_suffix_byte_for_byte` で確認する。
+
+## 27. 稼働中のプロジェクトからテンプレートへ書き戻したら、テンプレート専用の安全装置が消えた
+
+**症状**: テンプレートのセットアップ スクリプトを稼働中のプロジェクトのもので上書きしたら、「既定は計画表示、`--apply` で実行、`--seed-demo` でデモ投入」の引数と、`PUBLISHER_PREFIX` の一致チェックが無くなった。生成した利用者が実行すると、いきなり環境を書き換える。
+
+**原因**: テンプレート版は「汎用化（`${VAR}` 置換）」に加えて、配布用の入口（引数・事前チェック）を持っている。稼働版にはそれが無く、ファイル単位でコピーすると消える。差分が大きいと、レビューでも気付きにくい。
+
+**対処（恒久対策済み）**: 書き戻すときは、ファイルを丸ごとコピーせず、テンプレート側の入口（`main()`・引数・事前チェック）を残して中身だけを差し替える。`publish_skill.py` の `removed_template_entrypoints()` が、`templates/` 配下で削除されて同じファイルに戻っていない入口の行（`add_argument(` / `--apply` / `TEMPLATE_PREFIX` / `raise RuntimeError(` / `sys.exit(` など）を検出し、コミット前に止める（意図した変更は `--allow-entrypoint-change`）。実際の取りこぼし（construction-cockpit の書き戻し）で 10 行を検出し、その後の正しい修正 2 件では 0 件だった。手作業で公開するときも、コミット前に `git diff` でテンプレート側から消える行を読む。消えた場合は、マージ前のコミット（`git show <sha>:<path>`）から入口を戻す。
+
+## 28. PowerShell の文字列置換が、エラーも出さずに何も変えていない
+
+**症状**: `(Get-Content f -Raw).Replace("…複数行…", "…")` で書き換えて保存したのに、ファイルが変わっていない。後の手順で古いコードのまま動く。
+
+**原因**: ファイルの改行が CRLF で、置換元の文字列が LF（または逆）。`.Replace()` は一致しなければ何もせず、成功として返る。単一行の置換は当たり、複数行だけ外れるので気付きにくい。
+
+**対処**: 複数行の置換はエディターの置換ツールで行う。スクリプトで置換するときは、置換前に `Contains()` で一致を確かめ、一致しなければ止める。置換後に `Select-String` で新しい行が存在すること（と古い行が無いこと）を数えて確認する。
+
+## 29. 既存 PR を更新したら、他の人・別の端末がそのブランチに積んだ変更を巻き戻しかけた
+
+**症状**: 長く置いた作業 clone（または手元のスキル）から既存 PR のブランチへ反映しようとしたら、`git push --force-with-lease` が
+`rejected (stale info)` で拒否された。リモートのブランチには、別の端末から積まれたコミット（main の取り込み・別スキルのサンプル追加）があった。
+`publish_skill.py` はスキル フォルダを「消してから手元をコピー」するため、手元が古いファイルはそのまま PR 先の変更を上書きする
+（削除は #25 の検査で止まるが、両方にあるファイルの書き換えは止まらない）。
+
+**対処**:
+- 強制 push しない。リモートのブランチを取り込み、自分のコミットだけを cherry-pick（または rebase）する。番号を振る文書（troubleshooting の `## N.`）は、
+  相手が先に使った番号を避けて振り直す
+- 長く置いた作業 clone を使わず、毎回 `publish_skill.py`（一時 clone）で反映する。既存 PR を更新する前に、そのブランチのスキルを手元に取り込む
+
+**恒久対策済み** — `publish_skill.py` の `stale_overwrites()`。書き換えるファイルごとに PR 先（既存 PR のブランチ／ベース）での最後のコミット時刻を調べ、
+手元のファイルの更新時刻より新しければ止める（`--allow-overwrite` で明示的に許す）。
+
+## 30. 使い方を確かめるつもりで `--help` を付けたら、スクリプトが書き込みまで実行した
+
+### 症状
+
+`python sync_dataverse_client.py --help` を実行したら、使い方は表示されず、samples 配下の 17 個のコピーが上書きされた。
+
+### 原因
+
+`"--check" in sys.argv` のように**引数を直接調べるスクリプト**は、知らない引数（`--help`・打ち間違い）を黙って無視し、既定の動作（書き込み）に進む。
+
+### 対処（恒久対策済み）
+
+書き込みを伴うスクリプトは `argparse` で引数を解釈し、`--help` で使い方を出し、未知の引数は終了コード 2 で止める
+（code-apps `sync_dataverse_client.py` を修正）。新しいスクリプトでも `sys.argv` を直接見ない。
+既存のスクリプトの使い方は、実行する前にファイル先頭の docstring を読んで確かめる。

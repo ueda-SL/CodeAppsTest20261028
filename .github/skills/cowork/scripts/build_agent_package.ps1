@@ -1,0 +1,222 @@
+﻿<#
+.SYNOPSIS
+  Cowork プラグイン（M365 アプリパッケージ）の .zip を生成する汎用ビルドスクリプト。
+
+.DESCRIPTION
+  対象プラグインフォルダの manifest.json 内プレースホルダー __COWORK_OAUTH_REGISTRATION_ID__ を
+  `Base64("<TENANT_ID>##<COWORK_OAUTH_REGISTRATION_ID>")` に置換し、必須ファイルを検証してから .zip を生成する。
+  manifest.json 本体（source）はプレースホルダーのまま維持し、ビルド成果物にのみ実値を注入する
+  （実 registration ID を source にコミットしないため）。
+
+  .env の値は '...' / "..." で囲まれていても自動で引用符を取り除く（教訓: 引用符付きのまま
+  注入すると referenceId が壊れ、Cowork 初回同意時にコネクタ認証が失敗する）。
+
+  教訓（troubleshooting.md #23）: referenceId は OAuth client registration でも
+  `Base64("<tenantId>##<registrationId>")` 形式が必要（SSO 専用ではない）。実機検証で確認済み。
+  そのため .env の COWORK_OAUTH_REGISTRATION_ID には Teams ポータルが発行した **生の** registration ID
+  をそのまま保存し、Base64 エンコードは本スクリプトが自動で行う。
+
+.PARAMETER PluginRoot
+  プラグインのルートフォルダ（manifest.json・color.png・outline.png・skills/ を含む）。
+
+.PARAMETER EnvPath
+  .env のパス。省略時は PluginRoot から上位ディレクトリを遡って最初に見つかった .env を使う。
+
+.PARAMETER OutputName
+  生成する .zip のファイル名（拡張子なし）。省略時は PluginRoot フォルダ名。
+
+.EXAMPLE
+  pwsh build_agent_package.ps1 -PluginRoot ./cowork/my-plugin
+#>
+param(
+    [Parameter(Mandatory = $true)][string]$PluginRoot,
+    [string]$EnvPath,
+    [string]$OutputName
+)
+
+$ErrorActionPreference = "Stop"
+$root = Resolve-Path $PluginRoot
+if (-not $OutputName) { $OutputName = Split-Path $root -Leaf }
+
+# --- .env を探索（PluginRoot から上位へ遡る）---
+if (-not $EnvPath) {
+    $dir = $root
+    while ($dir -and -not (Test-Path (Join-Path $dir ".env"))) {
+        $parent = Split-Path $dir -Parent
+        if ($parent -eq $dir) { $dir = $null; break }
+        $dir = $parent
+    }
+    if ($dir) { $EnvPath = Join-Path $dir ".env" }
+}
+if (-not $EnvPath -or -not (Test-Path $EnvPath)) {
+    Write-Error ".env が見つかりません（-EnvPath で明示指定してください）。"
+}
+
+# --- .env から登録 ID / テナント ID を読む（引用符は自動で除去）---
+$regId = $null
+$tenantId = $null
+foreach ($line in Get-Content $EnvPath) {
+    if ($line -match '^\s*COWORK_OAUTH_REGISTRATION_ID\s*=\s*(.+?)\s*$') {
+        $regId = $Matches[1].Trim("'", '"')
+    }
+    if ($line -match '^\s*TENANT_ID\s*=\s*(.+?)\s*$') {
+        $tenantId = $Matches[1].Trim("'", '"')
+    }
+}
+if ([string]::IsNullOrWhiteSpace($regId)) {
+    Write-Error "COWORK_OAUTH_REGISTRATION_ID が .env にありません。Teams 開発者ポータルで OAuth client registration を作成し、発行された ID（生の値。Base64 変換前）を .env に設定してください。"
+}
+if ([string]::IsNullOrWhiteSpace($tenantId)) {
+    Write-Error "TENANT_ID が .env にありません。referenceId の Base64(`"<tenantId>##<regId>`") エンコードに必要です。"
+}
+
+# --- referenceId を Base64("<tenantId>##<regId>") 形式にエンコード ---
+# 教訓（troubleshooting.md #23）: OAuthPluginVault の referenceId は SSO 方式と同じく
+# Base64("<tenantId>##<registrationId>") 形式が必要（「生の ID のまま」では認証に失敗する）。
+# .env に既にエンコード済みの値が入っていると二重エンコードで壊れるため、デコードして生の ID に戻す。
+try {
+    $decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($regId))
+    if ($decoded -match "^$([regex]::Escape($tenantId))##(.+)$") {
+        Write-Warning "COWORK_OAUTH_REGISTRATION_ID はエンコード済みの値でした。生の registration ID として扱います。"
+        $regId = $Matches[1]
+    }
+} catch [FormatException] { }
+$rawReferenceId = "$tenantId##$regId"
+$encodedReferenceId = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($rawReferenceId))
+
+# --- manifest.json の referenceId を注入（一時ファイルに書き出し、元は placeholder のまま維持）---
+$manifestSrc = Join-Path $root "manifest.json"
+if (-not (Test-Path $manifestSrc)) { Write-Error "manifest.json が見つかりません: $manifestSrc" }
+$manifest = Get-Content $manifestSrc -Raw
+if ($manifest -notmatch "__COWORK_OAUTH_REGISTRATION_ID__") {
+    Write-Warning "manifest.json にプレースホルダー __COWORK_OAUTH_REGISTRATION_ID__ が見つかりません。referenceId が既に実値埋め込みの可能性があります。"
+}
+$built = $manifest -replace "__COWORK_OAUTH_REGISTRATION_ID__", $encodedReferenceId
+$builtManifest = Join-Path $root "manifest.built.json"
+Set-Content -Path $builtManifest -Value $built -Encoding UTF8
+
+# --- 検証: 必須ファイル ---
+foreach ($f in @("color.png", "outline.png")) {
+    if (-not (Test-Path (Join-Path $root $f))) { Write-Error "必須ファイルが見つかりません: $f" }
+}
+# mcpToolDescription は manifest 1.29 以降で任意（省略すると実行時に tools/list で動的検出する）。
+# 参照しているファイルだけを必須にして同梱する。1.28 は省略できない（アップロード検証で拒否される）。
+$manifestObj = $manifest | ConvertFrom-Json
+
+# --- 検証: コネクタ ID（troubleshooting.md #50）---
+# Cowork は同じ agentConnectors[].id のプラグインを 1 つしか有効にできない（「コネクタの競合」）。
+# どのプラグインでも付けがちな汎用 ID は、同じ ID のプラグインが 1 つでもあれば片方が無効になるので止める。
+$genericConnectorIds = @('dataverse-mcp', 'dataverse', 'dataversemcp', 'dataverse-mcp-server', 'mcp', 'mcp-server', 'remote-mcp', 'backend-mcp', 'custom-mcp', 'my-mcp')
+$connectorIds = @(@($manifestObj.agentConnectors) | Where-Object { $_ } | ForEach-Object { [string]$_.id })
+foreach ($cid in $connectorIds) {
+    if ($genericConnectorIds -contains $cid.ToLowerInvariant()) {
+        Write-Error "コネクタ ID '$cid' は汎用的すぎます。同じ ID のほかのプラグインと同時に有効にできません（Cowork の「コネクタの競合」）。'<プラグイン名>-$cid' のようにプラグイン固有の ID にしてください（troubleshooting.md #50）。"
+    }
+    if ($cid.Length -gt 64) { Write-Error "コネクタ ID '$cid' が 64 文字を超えています。" }
+}
+$dupIds = $connectorIds | Group-Object | Where-Object Count -gt 1 | ForEach-Object Name
+if ($dupIds) { Write-Error "manifest の中でコネクタ ID が重複しています: $($dupIds -join ', ')" }
+# 手元のほかのプラグインとの衝突は、COWORK_PLUGIN_SCAN_DIRS（; 区切り）があれば check_connector_ids.py で確かめる
+$scanDirs = $null
+foreach ($line in Get-Content $EnvPath) {
+    if ($line -match '^\s*COWORK_PLUGIN_SCAN_DIRS\s*=\s*(.+?)\s*$') { $scanDirs = $Matches[1].Trim("'", '"') }
+}
+if (-not $scanDirs) { $scanDirs = $env:COWORK_PLUGIN_SCAN_DIRS }
+if ($scanDirs) {
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
+    if ($python) {
+        $scanArgs = @(($scanDirs -split '[;,]') | Where-Object { $_.Trim() } | ForEach-Object { '--scan'; $_.Trim() })
+        & $python.Source (Join-Path $PSScriptRoot 'check_connector_ids.py') --manifest $manifestSrc @scanArgs
+        if ($LASTEXITCODE -ne 0) { Write-Error "コネクタ ID がほかのプラグインと重なっています（上の ✖ を参照）。" }
+    } else {
+        Write-Warning "python が見つからないため、COWORK_PLUGIN_SCAN_DIRS のプラグインとのコネクタ ID の突き合わせを省きました。"
+    }
+}
+$toolFiles = @()
+foreach ($connector in @($manifestObj.agentConnectors)) {
+    if (-not $connector) { continue }
+    $remote = $connector.toolSource.remoteMcpServer
+    if (-not $remote) { continue }
+    if ($remote.mcpToolDescription -and $remote.mcpToolDescription.file) {
+        $toolFiles += $remote.mcpToolDescription.file
+    } elseif ([version]$manifestObj.manifestVersion -lt [version]"1.29") {
+        Write-Error "manifestVersion $($manifestObj.manifestVersion) ではコネクタ '$($connector.id)' に mcpToolDescription が必須です。動的ツール検出にするなら manifestVersion を 1.29 以上にしてください。"
+    }
+}
+foreach ($f in $toolFiles) {
+    if (-not (Test-Path (Join-Path $root $f))) { Write-Error "mcpToolDescription のファイルが見つかりません: $f" }
+}
+$skillsDir = Join-Path $root "skills"
+if (-not (Test-Path $skillsDir)) { Write-Error "skills フォルダが見つかりません: $skillsDir" }
+$skills = Get-ChildItem $skillsDir -Directory
+foreach ($s in $skills) {
+    if (-not (Test-Path (Join-Path $s.FullName "SKILL.md"))) { Write-Error "SKILL.md が見つかりません: $($s.Name)" }
+}
+
+# --- zip 生成（manifest.built.json を manifest.json 名でルートに入れる）---
+$dist = Join-Path $root "dist"
+New-Item -ItemType Directory -Force -Path $dist | Out-Null
+$zip = Join-Path $dist "$OutputName.zip"
+if (Test-Path $zip) { Remove-Item $zip -Force }
+
+$staging = Join-Path $env:TEMP ("cowork_" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Force -Path $staging | Out-Null
+Copy-Item $builtManifest (Join-Path $staging "manifest.json")
+Copy-Item (Join-Path $root "color.png") $staging
+Copy-Item (Join-Path $root "outline.png") $staging
+foreach ($f in $toolFiles) {
+    $dest = Join-Path $staging $f
+    New-Item -ItemType Directory -Force -Path (Split-Path $dest -Parent) | Out-Null
+    Copy-Item (Join-Path $root $f) $dest
+}
+Copy-Item $skillsDir $staging -Recurse
+
+# --- 結果の見せ方の共通部品を差し込む（troubleshooting.md #52・#53）---
+# SKILL.md の <!-- include: display-rules.md --> を共通の表示ルール（チャットのグラフ = Render UI・表・HTML）に置き換え、
+# 計算結果からグラフ・表・HTML を作る report_builder.py とひな形をそのスキルの scripts/ に入れる。
+# プラグインの assets/ に同名のファイルがあればそちらを使う（プラグイン固有の調整）。
+function Resolve-Part([string]$name, [string]$fallback) {
+    $own = Join-Path $root (Join-Path 'assets' $name)
+    if (Test-Path $own) { return $own }
+    return $fallback
+}
+$skillRoot = Split-Path $PSScriptRoot -Parent
+$rulesPath = Resolve-Part 'display-rules.md' (Join-Path $skillRoot 'references' 'display-rules.md')
+$builderPath = Resolve-Part 'report_builder.py' (Join-Path $PSScriptRoot 'report_builder.py')
+$templatePath = Resolve-Part 'report-template.html' (Join-Path $skillRoot 'references' 'report-template.html')
+$includeMarker = '<!-- include: display-rules.md -->'
+$stagedSkills = Join-Path $staging 'skills'
+foreach ($md in Get-ChildItem $stagedSkills -Recurse -Filter 'SKILL.md') {
+    $text = Get-Content $md.FullName -Raw -Encoding utf8
+    if (-not $text.Contains($includeMarker)) { continue }
+    $text = $text.Replace($includeMarker, (Get-Content $rulesPath -Raw -Encoding utf8).TrimEnd())
+    Set-Content -Path $md.FullName -Value $text -Encoding utf8 -NoNewline
+    $scriptsDir = Join-Path $md.DirectoryName 'scripts'
+    New-Item -ItemType Directory -Force -Path $scriptsDir | Out-Null
+    Copy-Item $builderPath (Join-Path $scriptsDir 'report_builder.py') -Force
+    Copy-Item $templatePath (Join-Path $scriptsDir 'report-template.html') -Force
+}
+
+# 結果の見せ方（チャットのグラフ・HTML レポート）が省かれない書き方か。差し込んだ後の本文で確かめる（troubleshooting.md #52・#53）
+$pythonForCheck = Get-Command python -ErrorAction SilentlyContinue
+if (-not $pythonForCheck) { $pythonForCheck = Get-Command py -ErrorAction SilentlyContinue }
+if ($pythonForCheck) {
+    & $pythonForCheck.Source (Join-Path $PSScriptRoot 'check_visual_output.py') --skills $stagedSkills
+    if ($LASTEXITCODE -ne 0) {
+        Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Error "スキルの結果の見せ方（グラフ・HTML レポート）の書き方に問題があります（上の ✖ を参照）。"
+    }
+} else {
+    Write-Warning "python が見つからないため、結果の見せ方の検査（check_visual_output.py）を省きました。"
+}
+
+Compress-Archive -Path (Join-Path $staging "*") -DestinationPath $zip -Force
+Remove-Item $staging -Recurse -Force
+Remove-Item $builtManifest -Force
+
+Write-Host "[OK] パッケージ生成: $zip"
+Write-Host "     referenceId 注入済み (registrationId=…$($regId.Substring([Math]::Max(0,$regId.Length-4))), Base64エンコード済み)"
+if ($toolFiles.Count -eq 0) { Write-Host "     ツール: 動的検出（mcpToolDescription なし。manifest $($manifestObj.manifestVersion)）" }
+else { Write-Host "     ツール: 固定（$($toolFiles -join ', ')）" }
+Write-Host "     次: M365 管理センター -> エージェント -> Add agent -> Upload agent"

@@ -1,0 +1,450 @@
+---
+name: dataverse
+description: "Dataverse テーブル設計・構築・デモデータ投入・セキュリティロール作成。ソリューション作成からテーブル・リレーション・ローカライズ・権限設定まで Python スクリプトで一括構築する。"
+category: data
+triggers:
+  - "Dataverse テーブル作成"
+  - "テーブル設計"
+  - "スキーマ設計"
+  - "Lookup"
+  - "Choice"
+  - "リレーション"
+  - "デモデータ"
+  - "ソリューション"
+  - "パブリッシャー"
+  - "プレフィックス"
+  - "setup_dataverse"
+  - "セキュリティロール"
+  - "Security Role"
+  - "権限設定"
+  - "ロール作成"
+  - "AddPrivilegesRole"
+  - "ReplacePrivilegesRole"
+  - "PrivilegeDepth"
+  - "アクセス制御"
+  - "RBAC"
+  - "ロール権限"
+  - "テーブル権限"
+---
+
+# Dataverse テーブル設計・構築・セキュリティロールスキル
+
+Dataverse のソリューション・テーブル・リレーション・ローカライズ・デモデータ・セキュリティロールを **Python スクリプト** で一括構築する。
+
+Code Apps 向けに SharePoint URL を渡された場合も、直接接続・継続利用の明示がなければ
+**Dataverse への移行を既定**とする。URL は仕様・移行元の参照情報として扱う。
+スキーマ・業務キー・Lookup を設計し、既存データは [data-migration](../data-migration/SKILL.md) で承認付き投入・照合する。
+通常開発では admin の網羅チェックを挟まず、既存テーブルの重複確認など本スキルの安全な構築手順を進める。
+Code Apps の scaffold・初回 push は全テーブル構築・移行・ローカライズの完了を待たせない。
+
+## サブリファレンス（必要に応じて参照）
+
+| リファレンス | 内容 |
+|---|---|
+| [Dataverse 統合ガイド](references/dataverse-guide.md) | CRUD・Lookup・Choice・システム列・**標準テーブル再利用ガイド**・トラブルシューティング |
+| [セキュリティロール](references/security-role.md) | カスタムセキュリティロールの作成・権限設定パターン |
+| [セキュリティロールデプロイリファレンス](references/security-role-deploy-reference.md) | セキュリティロールのデプロイ手順詳細 |
+| [セキュリティロールトラブルシューティング](references/security-role-troubleshooting.md) | セキュリティロール関連のトラブルシューティング |
+
+> **このスキルの位置づけ**: アーキテクチャ設計（`architecture`）で Dataverse 利用が確定した後、テーブル設計→構築を担当する。Code Apps / Generative Pages / Power Automate / Copilot Studio のいずれを使う場合でも、データ層はこのスキルで構築する。
+
+## 前提
+
+### 事前確認（会話の最初に 1 回だけ）
+
+本スキルの利用が確定したら、[standard の共通契約](../standard/SKILL.md#共通の事前確認契約会話の最初に-1-回だけ)に加え、
+**1 回の AskUserQuestion で次をまとめて確認する**。
+
+| # | 質問 | 合格条件 |
+|---|---|---|
+| 1 | 対象 environment、solution、publisher はどれか | URL、環境種別、solution unique name、既存 publisher の再利用方針が確定している |
+| 2 | schema を変更できる担当者は誰か | テーブル、列、relationship、choice を作成・更新できる `System Customizer` 相当の権限がある |
+| 3 | security role を変更する担当者は誰か | role / privilege の作成・割り当て権限を持つ担当者を別に記録している |
+| 4 | データ ownership と access depth は何か | User / Team / Organization ownership、Business Unit、行共有、監査を設計済みである |
+| 5 | デモデータや既存データを変更してよいか | 対象件数、個人情報、削除 / rollback、バックアップ方針を承認済みである |
+
+`System Administrator` を既定にせず、schema 変更は `System Customizer` または必要 privilege の
+カスタムロールを優先する。security role の変更・割り当ては、その工程の担当者を分離する。
+実装先または publisher が未確定なら Step 0 へ進まない。
+
+### 共通認証: auth_helper.py
+
+認証ヘルパーは `standard` スキルに同梱（`.github/skills/standard/scripts/auth_helper.py`）。
+各スキルの Python スクリプトは `sys.path` に `../../standard/scripts` を追加して import するため、コピー不要。
+2 層キャッシュ（AuthenticationRecord + MSAL OS 資格情報ストア）によりデバイスコード認証は初回のみ。
+
+**コピー元:** `.github/skills/standard/scripts/auth_helper.py`
+
+#### auth_helper.py 公開 API
+
+| 関数 | 戻り値 | 説明 |
+|------|--------|------|
+| `api_get(path)` | `dict` | GET。パス文字列のみ（`api_get("url", {"$filter": ...})` は **不可**。クエリパラメータは URL に直接埋め込む） |
+| `api_post(path, body, solution=)` | `str \| None` | POST。作成レコードの ID を返す。`solution=SOLUTION_NAME` でソリューションヘッダー付与 |
+| `api_patch(path, body)` | `None` | PATCH |
+| `api_delete(path)` | `None` | DELETE |
+| `api_request(path, body, method="PUT")` | `None` | PUT + `MSCRM.MergeLabels: true` ヘッダー自動付与。ローカライズ用 |
+| `retry_metadata(fn, desc, max=5)` | `any \| None` | メタデータロック(0x80040237)・重複(already exists)検出リトライ。既存スキップ対応 |
+| `get_token(scope=)` | `str` | アクセストークン。省略時は `{DATAVERSE_URL}/.default` |
+| `flow_api_call(method, path, body)` | `dict` | Flow Management API 用。自動的に `service.flow.microsoft.com` スコープで認証 |
+
+> **重要**: `api_get()` は `dict` を直接返す。`.json()` を呼ぶとエラー。
+
+### .env 共通パラメータ
+
+```env
+DATAVERSE_URL=https://{org}.crm7.dynamics.com/
+TENANT_ID={your-tenant-id}
+SOLUTION_NAME={YourSolutionName}
+PUBLISHER_PREFIX={prefix}
+SOLUTION_DISPLAY_NAME={日本語表示名}   # ソリューション作成後に自動保存される
+```
+
+### 依存パッケージ
+
+```
+pip install azure-identity requests python-dotenv
+```
+
+## 作業フロー（必ずこの順序で進める）
+
+### Step 0: パブリッシャー・プレフィックス確認（ユーザー承認必須）
+
+**テーブル設計に入る前に、必ず既存パブリッシャーを環境から確認する。**
+
+```python
+from auth_helper import api_get
+
+# 既存パブリッシャー一覧を取得
+pubs = api_get("publishers?$filter=customizationprefix ne 'none'&$select=friendlyname,uniquename,customizationprefix&$orderby=friendlyname")
+for p in pubs.get("value", []):
+    print(f"  {p['customizationprefix']} — {p['friendlyname']} ({p['uniquename']})")
+```
+
+**ユーザーに提示する内容:**
+- 既存パブリッシャー一覧（プレフィックス・名前）
+- 推奨: 既存パブリッシャーを再利用するか、新規作成するか
+- 新規の場合: プレフィックス命名案（2〜5文字の英小文字）
+
+**ユーザーの承認を得てから `.env` の `PUBLISHER_PREFIX` を確定し、環境スキャンに進む。**
+
+### Step 1: 環境スキャン（既存資産の棚卸し — 設計前に必須）
+
+**新規テーブルを設計する前に、必ず既存環境を API でスキャンし、再利用できる資産を棚卸しする。**
+いきなり新規テーブルを作らず、標準テーブル・他ソリューションのカスタムテーブルを最大限再利用する。
+
+```powershell
+# 標準テーブル（account/contact/product/systemuser 等）＋全カスタムテーブルを走査し、再利用レポートを出力
+python -u .github/skills/dataverse/scripts/scan_environment.py --out spec/dataverse-scan.md
+# 特定テーブルの列詳細も見たいとき
+python -u .github/skills/dataverse/scripts/scan_environment.py --tables account,contact,product
+```
+
+**レポートをもとにユーザーに提示し、再利用 vs 新規を合意する:**
+- **ユーザー**: カスタムユーザーテーブルを作らない。`systemuser` Lookup ＋ `ownerid`/`createdby`/`modifiedby` システム列を使う。
+- **顧客**: 標準 `account`（企業）/ `contact`（個人）を再利用。顧客参照は **customer 型 Lookup**（account/contact ポリモーフィック）。
+- **製品**: 標準 `product` / `pricelevel` / `uom` を再利用。製品マスタを新規作成しない。
+- **既存カスタムテーブル**: Field Service 等が作成済みのテーブルは再利用候補として検討。
+- **新規作成**: 既存に存在しない「要件固有の概念」だけに絞る。
+
+> 詳細な再利用判断は [Dataverse 統合ガイド — 標準テーブル再利用ガイド](references/dataverse-guide.md#標準テーブル再利用ガイド) を参照。
+
+### Step 2: 名前衝突チェック（設計確定前に必ず実施）
+
+```python
+# ソリューション名の重複チェック
+existing_sol = api_get(f"solutions?$filter=uniquename eq '{SOLUTION_NAME}'&$select=solutionid,friendlyname")
+
+# テーブルスキーマ名の重複チェック
+# ⚠️ 環境によっては EntityDefinitions への $filter=startswith(...) が 501 Not Implemented になる。
+#    $select のみで全件取得し、プレフィックス一致は Python 側でフィルタする（詳細は Dataverse 統合ガイド参照）。
+all_tables = api_get("EntityDefinitions?$select=LogicalName,SchemaName,DisplayName")
+existing_tables = [t for t in all_tables["value"] if t["LogicalName"].startswith(f"{PREFIX}_")]
+```
+
+衝突がある場合はユーザーに報告し、名前を変更してから設計を確定する。
+
+> プレフィックスを既存プロジェクトと共用する環境では `{prefix}_project` のような一般名が
+> 高確率で衝突する。専用の名前空間（例: `{prefix}_kbproject`）を採用して回避する。
+> なお `setup_dataverse.py` は Step 1 の前に `validate_no_foreign_tables()` で
+> **対象ソリューション外の既存テーブルとの衝突を必ず再検証**し、検出したら API 呼び出し前に中断する。
+
+### Step 3: テーブル設計（ユーザー承認必須）
+
+設計書を作成してユーザーに提示する。以下をすべて含める:
+
+| 項目 | 内容 |
+|------|------|
+| 再利用テーブル一覧 | Step 1 スキャン結果から、再利用する標準/既存テーブルを明記 |
+| テーブル一覧 | 新規のみ。マスタ → 主 → 従属の順に記載 |
+| 列定義 | 英語スキーマ名、型、必須、Choice 値（100000000 始まり） |
+| 全 Lookup リレーション | 漏れなく明記（既存テーブルへの Lookup・customer 型を含む） |
+| ローカライズ計画 | テーブル名・列名・Choice オプションの日本語名 |
+| デモデータ計画 | 全テーブルに対して（従属テーブル含む） |
+
+> **Code Apps 案件: スキーマ承認後すぐに Code Apps サブエージェントを起動する（並行実行）**
+>
+> `architecture` スキルで Code Apps が確定している場合、ユーザーがスキーマを承認したタイミングで
+> **`code-apps` スキルをサブエージェントとして起動し**、Dataverse 構築（Step 4）と並行して
+> Code Apps 開発（scaffold → deploy → add-data-source）を進める。
+>
+> - **このエージェント（dataverse）**: Step 4 を `--skip-localize` で実行（テーブル構築のみ）
+> - **サブエージェント（code-apps）**: scaffold → `pac code init` → `npm run deploy` → `pac code add-data-source`（全テーブル）
+> - **このエージェント（dataverse）**: Code Apps 側の `add-data-source` 完了を待たずに `--localize-only` を実行して完了
+>
+> Dataverse 構築が先に終わっても Code Apps サブエージェントは独立して継続する。
+
+### Step 4: 構築スクリプト実行
+
+同梱の [setup_dataverse.py](scripts/setup_dataverse.py) をプロジェクト用にカスタマイズして実行する。
+
+> **必ず `python -u`（unbuffered）で実行する**: テーブル作成・Lookup 作成・ローカライズは
+> 数分〜十数分かかるため、標準の出力バッファリング下では「止まって見える」ことがある。
+> `-u` を付けて Step ごとの進捗（`=== Step 2: テーブル作成 ===` など）を確実にリアルタイム
+> 表示させる。スクリプト側でも `sys.stdout.reconfigure(line_buffering=True)` を有効化済み。
+
+> **Windows PowerShell でログをファイルにリダイレクト/`Tee-Object`する場合は、`chcp 65001` に加えて
+> `[Console]::OutputEncoding` も明示的に UTF-8 へ設定する**: `chcp 65001` は Windows の
+> コンソールコードページを切り替えるだけで、PowerShell（pwsh 7.x を含む）が子プロセスの出力を
+> 解釈する `[Console]::OutputEncoding`（.NET プロパティ）には自動反映されないことがある。
+> `chcp` だけだと `[Console]::OutputEncoding` が cp932 のまま残り、スクリプト側が UTF-8 で
+> 出力していても日本語部分が文字化けする（`-Encoding UTF8` を付けて読み直しても直らない、
+> リダイレクト時点で既に破損しているため）。両方を実行前に設定することで確実に防げる。
+>
+> ```powershell
+> [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+> chcp 65001
+> python -u setup_dataverse.py 2>&1 | Tee-Object -FilePath setup_dataverse.log
+> ```
+
+> **`TABLES` 定義は API 呼び出し前に自動で事前検証される**（`validate_tables()`, Step 0）:
+> Decimal/Integer の値域や String/Memo の `maxLength` が Dataverse の上限を超えていないかを
+> ローカルで静的チェックし、超過があれば構築を開始する前に分かりやすいエラーで停止する
+> （並行構築の途中で 400 エラーになり一部だけ作成された状態で止まる事故を防ぐ）。
+
+> **テーブルが複数ある場合は並行作成（環境の混雑度に応じて並行数を調整）**: `setup_dataverse.py` の
+> Step 2 では、`TABLES` に 2 つ以上のテーブルが定義されている場合、`ThreadPoolExecutor`
+> （デフォルト最大 3 並行）で**全テーブルを並行作成**する。
+>
+> ⚠️ **Dataverse のメタデータロックはテナント全体で共有される**ため、既存カスタムテーブルが
+> 大量にある（100 件超）環境や、同一環境で他セッションが並行してメタデータ操作をしている環境では
+> 並行数が高いほど競合が増える。実測では 10 テーブルを 5 並行で作成したところ 7 テーブルが
+> `max retries (5) exceeded` で失敗し、並行数を 2 に落として再実行したところ全て成功した。
+> 失敗が多発する場合は `create_tables()` の `ThreadPoolExecutor(max_workers=...)` を 2 まで
+> 下げて再実行する。**スクリプトはべき等**（成功済みテーブル・列は `already exists, skipping`
+> で自動スキップ）なので、同じコマンドを再実行するだけで失敗分だけがリトライされ、安全に復旧する。
+>
+> **Lookup（Step 3）は全テーブルと列が揃ってから**作成するので、このスクリプトでの呼び出し順は
+> 変わらない（`create_tables()` が全スレッドの完了を待ってから return する）。
+
+> **Code Apps を使う場合はローカライズを2段階に分ける**: `pac code add-data-source` は日本語
+> DisplayName だと `Failed to sanitize string` で失敗することがある。ローカライズ→英語に一時
+> 戻す→再ローカライズという無駄な往復を避けるため、**構築時点ではローカライズせず英語のまま
+> `add-data-source` を先に済ませ、その後にローカライズする**。
+>
+> ```powershell
+> python -u setup_dataverse.py --skip-localize   # テーブル構築のみ（英語のまま）
+> # ここで code-apps サブエージェント側の add-data-source を全テーブルに実行（build-reference.md Step 4）
+> python -u setup_dataverse.py --localize-only   # ローカライズ・デモデータ投入
+> ```
+>
+> Code Apps を使わない（Generative Page / モデル駆動型アプリのみ等）場合は、従来どおり
+> フラグなしで一括実行して問題ない（`python -u` は常に付ける）。
+
+## 必須要件
+
+### スキーマ設計
+
+| ルール | 理由 |
+|--------|------|
+| **設計前に環境スキャン（Step 1）を必ず実行** | 既存テーブルと重複作成して二重管理になる事故を防ぐ。`scan_environment.py` で棚卸し |
+| **ユーザー参照は systemuser ＋ システム列** | カスタムユーザーテーブルを作らない。`ownerid`/`createdby`/`modifiedby` を活用 |
+| **顧客は account/contact を再利用** | 標準テーブルを使う。顧客 Lookup は customer 型（account/contact ポリモーフィック） |
+| **製品は product/pricelevel/uom を再利用** | 製品マスタを新規作成しない |
+| **スキーマ名は英語のみ** | 日本語スキーマ名は `npx pa app add data-source` で失敗する |
+| **ユーザー参照は SystemUser テーブル** | カスタムユーザーテーブルを作らない |
+| **作成者・報告者は `createdby` システム列を利用** | カスタム ReportedBy Lookup は不要 |
+
+> ⚠️ **Power Pages 例外**: Power Pages では Web API 経由のレコード作成時に `createdby` がアプリケーションユーザー（サービスアカウント）になるため、`createdby` で報告者を追跡できない。Power Pages 向けテーブルでは **Contact テーブルへの Lookup 列で報告者を追跡する**設計が必須。詳細は power-pages スキルの教訓 19 を参照。
+| **Choice 値は `100000000` 始まり** | 0, 1, 2... はカスタム Choice では使用不可 |
+| **マスタテーブルは要件から網羅的に洗い出す** | カテゴリ・場所・設備等、ユーザーが言及した分類はすべてマスタ化 |
+| **全 Lookup リレーションシップを設計書に明記** | 漏れると Lookup が機能しない |
+| **デモデータは全テーブル（従属テーブル含む）に計画** | コメント等の従属テーブルにもデモデータを用意 |
+| **KPI・日数計算の起点になる日時は業務日時列として明示的に持つ** | `createdon` はレコードを Dataverse に書いた日時であり業務上の発生日時ではない。デモデータ投入や環境移行で全レコードが同日に寄り、終了日時より後ろになって日数差が負になる。詳細は [references/troubleshooting.md](references/troubleshooting.md) の教訓を参照 |
+| **Instructions のテーブル名は単数形の論理名** | Power Apps MCP / Dataverse MCP は LogicalName でアクセス。複数形(EntitySetName)や表示名は不可 |
+
+### 構築スクリプト
+
+| ルール | 理由 |
+|--------|------|
+| **`retry_metadata()` を使う** | auth_helper.py 組み込みのリトライ。メタデータロック(0x80040237)・重複(already exists)を自動ハンドリング |
+| **テーブル作成間に `time.sleep(10)`、列追加間に `time.sleep(5)`** | メタデータロックの **予防策**。retry_metadata はリアクティブ（発生後リトライ）だが、プロアクティブに待機する方が結果的に速い（リトライ回数が減る） |
+| **リレーション作成順: マスタ → 主 → 従属 → Lookup** | 依存テーブルが存在しないとリレーション作成失敗 |
+| **既存テーブルでもカラム欠落を補完** | テーブルは既存でも、前回失敗したカラムが欠けている場合がある。個別にカラム存在チェックして不足分を追加 |
+| **`api_post()` に `solution=SOLUTION_NAME` を渡す** | ソリューションヘッダー付与。テーブル・列・Lookup すべてに |
+| **テーブル作成後に `PublishAllXml`** | テーブルのメタデータを公開しないとローカライズが失敗する場合がある |
+| **`PublishAllXml` は 429 レート制限に備える** | 大量メタデータ操作後に 429 が頻発。時間を置いてスクリプト再実行で回復。べき等設計必須 |
+| **ローカライズは `api_request()` で PUT** | `MSCRM.MergeLabels: true` ヘッダーが自動付与される |
+| **ローカライズ後に再度 `PublishAllXml`** | ローカライズの反映に公開が必要 |
+| **ソリューション含有は `AddSolutionComponent` で検証** | `MSCRM.SolutionName` ヘッダーだけに依存しない |
+| **EntitySetName は API で取得** | 複数形の推測は誤る場合がある（例: `equipmentcategorys` vs `em_equipmentcategories`） |
+| **ソリューション表示名を `.env` に自動保存** | `_save_env_value("SOLUTION_DISPLAY_NAME", name)` で永続化。他スクリプトから参照可能 |
+| **メタデータロックで最大リトライ超過時は再実行** | `retry_metadata()` の max retries (5) を超えた列は、スクリプト再実行時に「既存。スキップ」で回復 |
+| **失敗が多発する環境では並行数を下げる** | 既存カスタムテーブルが多い環境では `max_workers` を 5→2〜3 に下げると失敗率が大幅に下がる（実測） |
+| **429 レート制限は時間を置いて再実行** | `PublishAllXml`・`EntityDefinitions` PUT で 429 が頻発。べき等設計でスクリプト再実行で回復 |
+
+### Lookup と NavProp
+
+| ルール | 理由 |
+|--------|------|
+| **`RelationshipDefinitions` への POST で Lookup 作成** | 1:N リレーション（Lookup）は `RelationshipDefinitions` エンティティセットへ `OneToManyRelationshipMetadata` を POST する。**`CreateOneToMany` バインドアクションは環境／Web API バージョンによって `404 Not Found` になる**ため使わない |
+| **Lookup 作成前に属性存在チェック必須** | `api_get("EntityDefinitions(LogicalName='{from}')/Attributes(LogicalName='{col}')")` で存在確認。存在すればスキップ。`retry_metadata` の "already exists" 検出だけに頼らない |
+| **LOOKUPS 形式: `from_table`, `column_logical`, `display`, `to_table`** | シンプルな 4 キー構造。`SchemaName` は `{from_table}_{column_logical}` で自動生成 |
+| **`@odata.bind` にはナビゲーションプロパティ名（NavProp名）を使う** | 列の論理名ではない。大文字/小文字が区別される |
+| **NavProp 名は `ManyToOneRelationships` で動的取得** | `ReferencingEntityNavigationPropertyName` を確認する |
+| **NavProp 名を推測しない** | `get_navprop(from_logical, to_logical)` ヘルパーで取得 |
+| **Lookup は `NavProp@odata.bind` で設定** | `/{EntitySetName}({id})` の形式 |
+| **Lookup リレーション作成はべき等設計** | 属性存在チェック → 存在すればスキップ → 未存在なら `RelationshipDefinitions` へ POST → `retry_metadata` で二重保護 |
+
+### ローカライズ
+
+| ルール | 理由 |
+|--------|------|
+| **テーブル表示名は PUT + MetadataId** | PATCH では反映されないケースがある |
+| **`api_request()` を使う** | `MSCRM.MergeLabels: true` ヘッダーが自動付与される |
+| **列の PUT には `@odata.type` が必要** | AttributeType に応じた OData 型を指定（Lookup → `LookupAttributeMetadata` 等） |
+| **Choice オプションは `UpdateOptionValue` アクション** | `api_post("UpdateOptionValue", {...})` で各オプションの日本語ラベルを更新 |
+
+### テーブルアイコン
+
+テーブルにカスタムアイコンを設定する場合は `standard` スキルの [アイコン作成リファレンス](../standard/references/icon-creation.md) を参照。
+SVG WebResource 作成 → `IconVectorName` の PUT 設定パターンが記載されている。
+
+### デモデータ投入
+
+| ルール | 理由 |
+|--------|------|
+| **NavProp 名を API から動的取得** | `get_navprop()` ヘルパーを使う |
+| **EntitySetName を API から動的取得** | `get_entity_set_name()` ヘルパーを使う |
+| **既存データのべき等チェック** | 主キー名で検索し、既存ならスキップ |
+| **スキーマを足したら既存レコードも更新する** | 「既存ならスキップ」だと、列を追加して再実行しても前回作ったレコードの新しい列は空のまま。デモデータは upsert（あれば PATCH）にし、投入後に新しい列が埋まった件数を読み戻す（[troubleshooting #25](references/troubleshooting.md)） |
+| **子テーブルの既存判定は「親＋名前」** | 親ごとに同名の子（作業・明細）があるのが普通。名前だけで判定すると別の親の子を上書きする。自己参照の Lookup（先行作業など）は全件作成後に 2 巡目で結ぶ（[troubleshooting #26](references/troubleshooting.md)） |
+| **`api_post()` の戻り値は ID 文字列** | `r.headers["OData-EntityId"]` ではなく、直接 ID が返る |
+| **時系列グラフ用のデモは「日付は相対・主キーは固定」で生成** | 日付を実行日からの相対で作り、主キー（件名等）には日付を入れず `D07-2` のような**オフセット連番**を使う。日付を主キーに含めると翌日の再実行でべき等チェックが効かずレコードが増殖する |
+| **乱数は日ごとに固定シードで引く** | `random.Random(BASE + offset)` にすると、再実行しても同じ日は同じ件数・同じ内訳になり、グラフの見た目が安定する |
+
+> **時系列グラフ用デモデータの密度**: 1 日 1 件では推移が読めない。
+> `rnd.choice([0, 1, 1, 2, 2, 3])` のように 0 件の日を混ぜた分布にすると、実運用に近い凹凸が出る。
+> 率の KPI（自動回答率など）を目標値と比較させたい場合は、分類の確率しきい値を実測しながら調整する
+> （例: 自動回答 75% / 回答不能 13% / 人が回答 12%）。
+
+> **集計対象の列は必ず埋める**: 出典・分類などの子テーブルが 1 件でも欠けると、
+> 「〜率 100%」を狙った KPI が達成できず、実装バグと区別がつかなくなる。
+> デモデータ計画の段階で「この KPI が 100% になるための最低件数」を確認する。
+
+### Dataverse 検索（検索ボックス・ドロップダウン）
+
+| ルール | 理由 |
+|--------|------|
+| **検索の対象にするのは API でできる** | `python scripts/setup_dataverse_search.py --table <prefix>_xxx --table systemuser`（`SyncToExternalSearchIndex` を PUT して読み戻す）。反映は数分〜十数分かかるため `--query` で確認する |
+| **簡易検索ビューは API で変更しない** | `fetchxml` の PATCH は内容を変えなくても 400（0x80040216）になる。カスタム テーブルの検索対象は主列だけなので、番号・住所などはアプリ側で `contains` を併用し、関連性検索の順位を優先して重複を除く（[troubleshooting #29](references/troubleshooting.md)） |
+| **画像は JSON の base64 で登録できる** | 画像列は作成・更新の本文に `"<列>": "<base64>"` を入れられ、フルサイズで保存される。AI エージェントの Dataverse ツールから写真を登録する経路に使える（[troubleshooting #30](references/troubleshooting.md)） |
+
+## テーブル設計テンプレート
+
+```markdown
+## テーブル設計書
+
+### テーブル一覧
+
+| # | テーブル (論理名) | 種別 | 説明 |
+|---|---|---|---|
+| 1 | **{prefix}_mastera** | マスタ | ... |
+| 2 | **{prefix}_mainentity** | 主テーブル | ... |
+| 3 | **{prefix}_childentity** | 従属 | ... |
+
+### 列定義: {prefix}_mainentity
+
+| 列 (論理名) | 表示名 | 型 | 必須 | 備考 |
+|---|---|---|---|---|
+| {prefix}_name | Name / 名前 | String(200) | Yes | 主列 |
+| {prefix}_status | Status / ステータス | Picklist | No | 100000000=New, 100000001=Active |
+| {prefix}_masteraid | MasterA / マスタA | Lookup→mastera | No | |
+
+### Lookup リレーション
+
+| From (referencing) | → To (referenced) | lookup_attr | 表示名 |
+|---|---|---|---|
+| mainentity | mastera | {prefix}_masteraid | マスタA |
+| mainentity | systemuser | {prefix}_assigneeid | 担当者 |
+| childentity | mainentity | {prefix}_mainentityid | メイン |
+
+### Choice 値
+
+| フィールド | 値 |
+|---|---|
+| mainentity.status | 100000000=New, 100000001=Active, 100000002=Closed |
+
+### ローカライズ
+
+| 対象 | 日本語名 |
+|---|---|
+| mastera テーブル | マスタA / マスタA |
+| mainentity テーブル | メインエンティティ / メインエンティティ一覧 |
+| mainentity.name | 名前 |
+| mainentity.status | ステータス |
+| mainentity.status=100000000 | 新規 |
+| mainentity.status=100000001 | アクティブ |
+
+### デモデータ計画
+
+| テーブル | 件数 | 概要 |
+|---|---|---|
+| MasterA | 5件 | ... |
+| MainEntity | 10件 | 各ステータスを網羅 |
+| ChildEntity | 8件 | 主要レコードにコメント |
+```
+
+## スクリプト構成
+
+### 同梱スクリプト
+
+| スクリプト | 用途 |
+|---|---|
+| [scan_environment.py](scripts/scan_environment.py) | **設計前の環境スキャン**。標準/既存カスタムテーブルを棚卸しし、再利用推奨レポートを出力（Step 1） |
+| [setup_dataverse.py](scripts/setup_dataverse.py) | テーブル・Lookup・ローカライズ・デモデータの一括構築（Step 4） |
+| [setup_dataverse_search.py](scripts/setup_dataverse_search.py) | テーブルを Dataverse 検索（関連性検索）の対象にする・状態確認・検索の動作確認（`--table` 複数可、`--check`、`--query`）。簡易検索ビューは変更しない |
+
+### テンプレート（プロジェクト用にカスタマイズ）
+
+[setup_dataverse.py](scripts/setup_dataverse.py)
+
+カスタマイズ箇所:
+- `TABLES` — テーブル定義（論理名・列定義）
+- `LOOKUPS` — リレーション定義
+- `LOCALIZE_TABLES` / `LOCALIZE_COLUMNS` / `LOCALIZE_OPTIONS` — 日本語化定義
+- `create_demo_data()` — デモデータ投入ロジック
+
+実行ステップ:
+1. **ソリューション確認/作成**（べき等。表示名を .env に自動保存）
+2. **テーブル作成**（`retry_metadata` + 既存カラム補完）
+3. **Lookup リレーション作成**
+4. **カスタマイズ公開**（`PublishAllXml`）
+5. **日本語ローカライズ**（`api_request` PUT + MergeLabels + `UpdateOptionValue`）
+6. **再公開**
+7. **デモデータ投入**（NavProp・EntitySetName 動的取得）
+8. **ソリューション含有検証**（`AddSolutionComponent`）
+9. **テーブル検証**（EntitySetName で実クエリ）
+
+> Code Apps 案件では `--skip-localize` で 1〜4 のみ実行 → `add-data-source` → `--localize-only` で 5〜9 を実行する（詳細は Step 4）。
+
+## 関連スキル
+
+| スキル | 関係 |
+|--------|------|
+| `standard` | 共通認証（auth_helper.py）・.env パラメータ・retry_metadata |
+| `architecture` | アーキテクチャ判断後にこのスキルへ |
+| `code-apps` | テーブル構築後に Code Apps 開発 |
+| `generative-page` | テーブル構築後に Generative Page 開発 |
+| `model-driven-app` | テーブル構築後にモデル駆動型アプリ作成 |
+| `security-role` | テーブル構築後にセキュリティロール設定 |

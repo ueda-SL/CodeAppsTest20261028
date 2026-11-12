@@ -1,0 +1,880 @@
+---
+name: code-apps
+description: "Power Apps Code Apps の初期化・Dataverse 接続・UI 設計・開発・デプロイ。SharePoint URL は明示指定がなければ移行元として扱い、Dataverse ベースで開発する。環境チェックは明示依頼時・障害時だけとし、初回デプロイを優先する。TypeScript + React + Tailwind CSS、Copilot Studio v2 iframe、Agent flows、CSP・メール送信にも対応。"
+category: ui
+triggers:
+  - "Code Apps"
+  - "pa app init"
+  - "pa app push"
+  - "pa app share"
+  - "power-apps init"
+  - "power-apps push"
+  - "power-apps share"
+  - "Code Apps 共有"
+  - "add data-source"
+  - "add-data-source"
+  - "コネクタ ID"
+  - "コネクタ追加"
+  - "shared_sharepointonline"
+  - "データソース追加"
+  - "DataverseService"
+  - "Tailwind"
+  - "shadcn"
+  - "React"
+  - "TypeScript"
+  - "Vite"
+  - "Code Apps デプロイ"
+  - "nameUtils パッチ"
+  - "日本語サニタイズ"
+  - "Code Apps デザイン"
+  - "プラント設計"
+  - "JSON 駆動 3D"
+  - "ユニット配置"
+  - "UI 設計"
+  - "コンポーネント選定"
+  - "画面レイアウト"
+  - "ギャラリー"
+  - "テーブル"
+  - "カンバン"
+  - "ガントチャート"
+  - "ダッシュボード"
+  - "フォーム"
+  - "デザイン例"
+  - "iframe"
+  - "embed"
+  - "埋め込み"
+  - "CSP"
+  - "Content Security Policy"
+  - "frame-src"
+  - "connect-src"
+  - "メール送信"
+  - "PDF添付"
+  - "PDF生成"
+  - "htmlToPdfBase64"
+  - "ContentBytes"
+  - "base64"
+  - "html2canvas"
+  - "jsPDF"
+  - "地図"
+  - "マップ"
+  - "Google Maps"
+  - "MapEmbed"
+  - "add-flow"
+  - "list-flows"
+  - "フロー呼び出し"
+  - "フロー連携"
+  - "AI Builder"
+  - "詳細画面"
+  - "詳細ページ"
+  - "detail page"
+  - "RecordListPanel"
+  - "レコード一覧パネル"
+  - "インライン編集"
+  - "executeAsync"
+  - "dataSourcesInfo"
+  - "Copilot Studio コネクタ"
+  - "Copilot Studio v2 iframe"
+  - "Web app iframe"
+  - "cliAgent"
+  - "Copilot Studio 直接"
+  - "ExecuteCopilotAsyncV2"
+  - "shared_microsoftcopilotstudio"
+  - "エージェント呼び出し"
+  - "会話継続"
+  - "conversationId"
+  - "デプロイして"
+  - "プッシュして"
+  - "ディープリンク"
+  - "deep link"
+  - "queryParams"
+  - "パラメータ渡し"
+  - "URL パラメータ"
+---
+
+# Code Apps 開発スキル
+
+Power Apps Code Apps（コードファースト）を **TypeScript + React + Tailwind CSS** で開発する。
+UI 設計・CSP 構成・メール送信パターンまで Code Apps 開発の全領域をカバーする統合スキル。
+
+> **プラント・設備の JSON 駆動設計**: [モジュール設計パターン](references/modular-plant-design.md) と
+> [追加テンプレート](templates/modular-plant/README.md) を参照。敷地・ユニット・ポート接続、CSP 対応検証器、
+> Python 候補生成、Dataverse 改訂・提案レビューを再利用できる。既存アプリへのアドオンであり scaffold 元ではない。
+> 型・形状・共有保存の単独テストを先に通し、導入後のブラウザー/Teams/一般利用者権限は別ゲートで実測する。
+
+> **設計と保守を統合する場合**: [Plant Design & Maintenance サンプル](samples/plant-design-maintenance/README.md) を参照。
+> 既存画面・合成3Dモデル・部位別の故障／修理・ヒートマップ・AI候補の変更前後比較を同梱。
+> `npm ci` → Python依存導入 → `npm run generate` → `npm run predeploy` で単体検証できる。
+> AI候補は確定まで下書きに適用せず、共有保存と分離する。外部接続は既定無効。Code App は Dataverse と Copilot Studio の生成サービスだけへ接続し、MCP Server は Copilot Studio のツールとして構成する。
+
+> **3D モデル（建物・家具・設備）を扱う場合**: [3D 資産の共通利用](references/3d-asset-sharing.md) を参照。
+> 既定 CSP で読める資産の持ち方（画像は `img-src 'self'`、JSON は import、GLB の扱い）、素材ライブラリの色合わせ・ライセンス、
+> 契約検証（`scripts/validate_3d_assets.py`）とヘッドレス描画確認（`scripts/capture_3d.mjs`。ソフトウェア描画で黒くなる問題を含む）、
+> 実在の GLB（テクスチャ埋め込み）を既定 CSP の中で表示する方法（`?inline` + `createImageBitmap` のプラグイン）を再利用できる。
+> 工事・設備の**進捗**を 3D で見せる場合（完成形を破線、施工中をクリッピングで立ち上げる、部位と工程の対応、GLB の書き出し）は
+> [3D 施工進捗モデル](references/three-d-progress-model.md) を参照。drei の `<Environment preset>` は CSP で失敗するとアプリ全体が落ちるので使わない（チェック 13 が検出）。
+
+> **図面レビューを非同期会話で回す場合**: [図面コミュニケーション アドオン](templates/drawing-communication/README.md) と
+> [PoC サンプル](samples/drawing-communication-poc/README.md) を参照。版付き図面 JSON と検証器、A3 の SVG 描画、
+> 注釈／タスク、候補の差分・採用・Undo、会話の相関コントラクト（会話 ID・ターン ID・編集バージョン・基準ハッシュ、重複ターン拒否）、
+> A3 PDF を生成する Python スキルを再利用できる。Dataverse 未接続時は DEMO ワーカーであることを UI に明示し、実エージェント応答と偽らない。
+
+> [!NOTE]
+> 本スキルは React + Vite の **Web Code Apps** 用。Expo／React Native、camera／barcode／location 等の
+> 端末ネイティブ機能、Power Apps Developer app、Wrap が要件なら
+> [`mobile-apps`](../mobile-apps/SKILL.md) へ切り替える。Native は Private Preview で本番利用できない。
+
+> [!NOTE]
+> Microsoft Learn の現行概要では、Code Apps は **React / Vue などの SPA を Power Apps 上でホストする仕組み** とされている。
+> この開発標準はその中でも **React ベース実装に標準化**したガイドであり、他フレームワーク一般論ではなく、このリポジトリのテンプレートと運用実績に基づく推奨事項をまとめている。
+
+## 1. 概要
+
+Code Apps 開発は **設計 → 初回デプロイ → データソース接続 → 改善デプロイ** の順に進む。
+
+**既定は Dataverse**。SharePoint URL を渡されても、直接接続・継続利用を明示されない限り
+仕様・移行元の参照情報として扱い、SharePoint コネクタを追加しない。
+[dataverse](../dataverse/SKILL.md) と [data-migration](../data-migration/SKILL.md) で移行し、
+Code Apps は Dataverse の接続参照を使用する。移行元の読み取り権限・移行承認は別途必要。
+
+**環境チェックを明示的に依頼されない限り、すぐに開発を開始する。**
+DLP / ACP・Code Apps 許可・マネージド環境・MCP の診断を開始条件にしない。
+対象環境とデプロイ承認を確認できたら、ローカル predeploy / build を通して初回 push を優先する。
+初回 push はテーブル全件構築・データ移行・ローカライズの完了を待たず、未接続部分を UI に明示する。
+障害時だけ [admin の権限確認付き復旧](../admin/references/development-recovery.md) を使用する。
+
+> [!NOTE]
+> **サブエージェント並行実行パターン**: `architecture` スキルで Code Apps が確定し、`dataverse` スキルで
+> スキーマが承認されたタイミングで、このスキルがサブエージェントとして起動される。
+> Dataverse 構築（`--skip-localize` フェーズ）と Code Apps 開発（scaffold → deploy → add-data-source）は
+> **並行して進める**。Dataverse 構築が先に終わったら `--localize-only` でローカライズ＆デモデータ投入。
+
+### 標準ワークフロー全体像
+
+```
+[設計]  ① デザインテンプレートを選ばせる（6種・プレビュー付き）
+        ② 画面設計（design-pattern）→ ユーザー承認
+          │
+[§2 初回デプロイ]
+        ③ テンプレート scaffold + npm install（業務テンプレートがあれば templates/sales-crm 等から生成。Dataverse 構築 Phase 2 と並行して即着手／VS Code では Code Apps サブエージェントとして起動）
+        ④ ソリューションの ID を確定（初回 push で使用）
+        ⑤ npx pa app init（power.config.json 生成）
+        ⑥ vite.config.ts 必須設定の確認 / .env 設定
+        ⑦ npm run deploy -- --solution-id {GUID}（build + pa app push）★初回 push でソリューション所属が確定
+          │
+[§3 データソース接続]
+        ⑧ 専用接続 + 接続参照を用意 → add_data_source.py（初期化したアプリのルートで実行）
+        ⑨ MicrosoftDataverseService + *WithOrganization ラッパーを実装
+          │
+[§4 改善デプロイ]
+  ⑩ src/ 実装 → npm run deploy（pa app push を反復）
+  ⑪ 最終 push 後に pa app share（利用者は play、共同開発者だけ edit）
+```
+
+### この後の章構成
+
+| 章 | 内容 |
+|---|---|
+| §1 概要（本章） | 標準ワークフロー全体像・大前提・設計フェーズ（デザインテンプレート選択） |
+| [§2 初回デプロイ](#2-初回デプロイ) | 環境前提・scaffold・ソリューション/接続参照の準備・init・初回 build & push |
+| [§3 データソース接続](#3-データソース接続) | add_data_source.py（コネクタ ID 自動解決・非対話）・接続参照バインド・MicrosoftDataverseService・Lookup 名前解決 |
+| [§4 改善デプロイ](#4-改善デプロイ) | 開発時の必須ルール・再デプロイ・プレデプロイレビュー |
+| [§5 リファレンス](#5-リファレンス) | 全リファレンス索引・技術スタック・.env |
+
+> [!NOTE]
+> 本スキル内のコード例は `{prefix}_tablename` 等のプレースホルダーで汎用化されています。
+> 実際のテーブル名・型名は、あなたのプロジェクトのエンティティに読み替えてください。
+> パターン（Lookup 名前解決、SDK ラッパー、useMemo マップ等）はそのまま適用できます。
+
+### 設計フェーズ（実装前に必須）
+
+**コードを書く前に、デザインテンプレートの選択と UI 設計を行い、ユーザーの承認を得ること。** 手順:
+
+1. [デザインテンプレート集](references/design-templates.md) の 6 種を一覧＋プレビューで提示し、ユーザーに 1 つ選んでもらう（デプロイされるアプリは常に 1 テンプレート。dark/light は `ThemeProvider` + `ModeToggle`）。
+2. [デザインシステム](references/design-pattern.md) を読み込み、画面構成・コンポーネント選定・Lookup 名前解決パターンを設計する。
+3. 設計（選択テンプレート＋画面設計）を提示し、「この設計で進めてよいですか？」と承認を得る。承認の証跡を残す場合は、[設計承認 Issue テンプレート](references/design-approval.yml) を対象プロジェクトの `.github/ISSUE_TEMPLATE/` にコピーして Issue を作成する。
+4. 承認後、選択テンプレートの CSS Variables を `styles/index.pcss` に適用してから実装する（変数一式・適用手順は [デザインテンプレート集](references/design-templates.md)）。
+
+> **CRUD 画面は [CRUD UI 標準パターン](references/crud-ui-pattern.md) に必ず従う**: 一覧は行／カード全体をクリックして詳細を開く（目アイコン等の小さなクリック領域は使わない）、詳細の編集はモーダルではなくインライン編集モード、行内の削除・クイック操作は `e.stopPropagation()`、削除確認はブラウザの `confirm()` ではなくモーダル（`useConfirm()` / AlertDialog）。**指示がなくても、テーブルごとに「一覧・詳細（インライン編集）・作成・削除」を標準実装すること。**
+
+> **画面の骨格は [デザインシステム](references/design-pattern.md#ページの骨格新規画面はここから書き始める) からコピーして書き始める**: マルチカラムは `grid-cols-[minmax(0,1fr)_...]`（素の `1fr` は使わない）＋**直接の子すべてに `min-w-0`**、長文は `break-words` ではなく `[overflow-wrap:anywhere]`、コード・表・JSON は `overflow-x-auto` で閉じ込める。`min-w-0` は後付けすると必ず抜けるため最初から書く。`npm run predeploy` のチェック 7 が抜けを警告する。
+
+> **画面が 3 つ以上あるアプリには [使い方ガイド](references/onboarding-guide-pattern.md) を標準実装する**: 初回起動でカルーセルを自動表示し、「使い方を見る」から実操作ツアーへ繋ぐ。設計提示の段階でスライド構成（4〜6 枚）とツアー手順を画面一覧と一緒に示す。
+
+> **設計で提示する内容**: 選択テンプレート、画面一覧（ページ名・ルート）、各画面のコンポーネント構成、カラム定義、Lookup 名前解決方法（`_xxx_value` + `useMemo` Map）、ナビゲーション構造、テレメトリの転送先と監視する SLI（転送しない場合も明記）。
+
+> **大前提（ソリューション運用）**: Dataverse テーブル・Code Apps・Power Automate・Copilot Studio は同一ソリューション内に開発し、`.env` の `SOLUTION_NAME` / `PUBLISHER_PREFIX` を全フェーズで統一する。詳細は [`standard` スキル](../standard/SKILL.md)。
+
+## 2. 初回デプロイ
+
+### デプロイ先とローカル構成（管理 API の事前確認は不要）
+
+対象環境・アカウント・ソリューションとローカル構成を確認する。
+Code Apps 許可は製品上の要件だが、通常フローでは管理センターや管理 API で事前診断せず push を試す。
+既に無効と分かっている場合は無駄に push せず、復旧手順へ進む。
+
+```
+1. Power Platform 管理センターで「コード アプリを許可する」がオン
+   → オフの場合: CodeAppOperationNotAllowedInEnvironment (403) エラー
+
+2. npm CLI のアクティブアカウントが対象テナント用
+  npx pa auth status
+  npx pa auth switch --account user@contoso.com
+
+3. power.config.json は npx pa app init で生成する
+   → テンプレートから手動コピーしない
+   → 別環境の appId が残っていると: AppLeaseMissing (409) エラー
+  → 新規環境では必ず npx pa app init で新規生成
+```
+
+> 環境全体のチェックは明示依頼時のみ、障害時は原因に必要な項目だけを
+> [admin スキル](../admin/SKILL.md) で診断する。委任権限がなければ管理操作を試さず管理者へ依頼する。
+> **Code Apps の必須条件は環境で「コード アプリを許可する」が有効であること**。
+> マネージド環境はガバナンス上の選択肢であり、Code Apps のデプロイ要件ではない。
+> **CLI の実行ファイル名は `pa`**。`@microsoft/power-apps-cli` は bin を `power-apps` から **`pa`** にリネームし、
+> コマンドも group 化した（`init` → `app init`、`push` → `app push`、`auth-status` → `auth status`）。
+> 旧名を呼ぶと `npm error could not determine executable to run` だけが出て原因が見えない。
+> `npm run predeploy`（チェック 11）が package.json のデプロイコマンドとインストール済み bin 名の不一致を検出する。
+> 全コマンドの対応表は [npm CLI リファレンス](references/cli-reference.md)。
+
+### プロジェクトの 3 つの生成段階（生成物は手動作成・コピー禁止）
+
+| 生成元 | 主な生成物 |
+|---|---|
+| ① テンプレート scaffold | `vite.config.ts` / `plugins/` / `styles/` / `src/` / `tsconfig*` / `package.json` 一式 |
+| ② `npx pa app init` | `power.config.json`（＋ `.power/`）。`vite.config.ts` や `plugins/` は生成**しない** |
+| ③ `npx pa app add data-source --connector shared_commondataserviceforapps` | `.power/schemas/appschemas/dataSourcesInfo.ts` / `src/generated/services/MicrosoftDataverseService.ts` / `src/generated/models/MicrosoftDataverseModel.ts` |
+
+> どのファイルを誰が生成し、何をカスタマイズしてよいかの一覧は [ビルドリファレンス](references/build-reference.md)。SDK 管理ファイル（`power.config.json` / `dataSourcesInfo.ts` / `src/generated/`）は手動編集禁止。
+
+### テンプレートのプレースホルダー設計
+
+テンプレートのデモメニューには `template: true` フラグが付いている。このフラグが残ったまま `npm run predeploy` を実行するとエラーになるため、削除忘れを防げる。
+
+```typescript
+// template: true が付いた行はデプロイ前に削除 or テーマ用に書き換える
+{ label: "顧客", path: "customers", iconKey: "customers", template: true },
+// テーマ固有のメニュー（template フラグなし）
+{ label: "ダッシュボード", path: "dashboard", iconKey: "dashboard" },
+```
+
+デプロイ前は `npm run predeploy`（`.env`・`power.config.json` を自動検証）→ `npm run deploy`（predeploy + build + push を一括実行）。
+
+**認証はキャッシュ優先**。`pa auth status` はアカウント表示で、push 時の更新成功を保証しない。
+TTY が無いだけでは停止せず、CLI 自身の暗号化キャッシュからのサイレント取得・更新を使う。
+接続セットアップは下記のラッパーを使い、本人の認証・Edge プロファイルを確認した場合だけ
+`--allow-interactive` を付ける。必要な実コマンドを対話コンソールで実行し、手動ターミナルへの移動を要求しない。
+device-code は使わず、通常のキャッシュ再利用を先に試す。
+Python/SDK は `auth_helper` の共有キャッシュを使うが、npm CLI は別 client ID・専用キャッシュである。
+外部トークンを受け取る公開オプションが無いため、CLI へ直接共有できたとは報告しない。
+詳細は [認証・キャッシュ境界](references/cli-reference.md#認証)。
+
+テンプレートは `src/lib/telemetry.ts` を含み、起動時に `initializeLogger` を登録する。既定では外部送信せず、
+クエリ文字列・フラグメント・GUID を除去したメトリクスだけを `code-apps:telemetry` イベントへ出力する。
+Application Insights 等へ転送する場合は custom sink と CSP の `connect-src` を合わせて設計する
+（[テレメトリ / 可観測性パターン](references/telemetry-pattern.md)）。
+
+### 標準ワークフロー
+
+チュートリアル・画面ツアーを追加するときは、最初から
+[標準チュートリアル構成](references/tutorial-pattern.md) を使う。対象内は透明、枠外だけ暗幕、
+フォーカス後のスクロール、固定ヘッダーと非同期レイアウトの再計測を実装し、
+通常の `npm run predeploy` の既知不具合チェックと実プレイヤーの視覚検証を行う。
+
+上から順に実行すれば動く正常系フロー。各 Step の詳細・必須設定・型定義は [ビルドリファレンス](references/build-reference.md) を参照。
+
+```bash
+# Step 0: テンプレート scaffold（標準では @GeekPowerCode が scaffold）
+# Code Apps 採用が決まった時点（設計承認後）で、Dataverse 構築（Phase 2）と並行して着手する
+# （npm install はネットワーク待ちのみで Dataverse 構築をブロックしないため、待たずに並行実行する）。
+# VS Code では本トラック全体を「Code Apps サブエージェント」として並行起動できる。
+# 先行工程（scaffold / init / 初回 build & push）はテーブル不要。以下は Dataverse 接続情報の準備を待つ同期点:
+#   ★同期①: shared_commondataserviceforapps の connectionId / orgUrl が揃ったら add data-source を 1 回実行
+#   ★同期②: pa app add flow は Power Automate Phase 5（フロー実装）完了後に実行
+# 詳細は standard §8「開発フロー全体図」を参照。
+cp -n .github/skills/standard/references/gitignore-template .gitignore   # .gitignore がなければコピー
+# 共通スキャフォールダーで生成計画を確認し、同じコマンドから --dry-run を外して生成する
+python .github/skills/update-skills/scripts/scaffold_from_template.py \
+  --template .github/skills/code-apps/templates/generic-base --target {TARGET_DIR} --dry-run
+python .github/skills/update-skills/scripts/scaffold_from_template.py \
+  --template .github/skills/code-apps/templates/generic-base --target {TARGET_DIR}
+# 業務テンプレートから始める場合は --template を差し替える（generic-base を extends 済み。例: 営業支援 CRM）
+#   --template .github/skills/code-apps/templates/sales-crm
+#   --template .github/skills/code-apps/templates/agm-qa-assist   # 株主総会 Q&A アシスト
+#   --template .github/skills/code-apps/templates/store-ordering  # 店舗発注システム（業務端末風 UI ＋ Dataverse ＋ 合成デモデータ）
+#   --template .github/skills/code-apps/templates/construction-cockpit   # 建設現場コックピット（--var PUBLISHER_PREFIX / COWORK_PLUGIN_ID / DATAVERSE_ORIGIN）
+#   --template .github/skills/code-apps/templates/perse3d-studio   # パース3D内見スタジオ（--var PUBLISHER_PREFIX）
+# scaffold.json に questions があるテンプレートは、値を AskUserQuestion で 1 問ずつ聞いてから生成する:
+#   --questions --env <answers.env> で未回答の質問（JSON）を出す → 1 問ずつ聞いて answers.env に追記 → [] になるまで繰り返す
+#   → --env <answers.env> --write-env {TARGET_DIR}/.env で生成（答えが .env にも入る）
+# 対象ディレクトリは空（.git / .github / .vscode / .env だけなら空とみなす）であること
+npm install --no-audit --no-fund
+
+# 既存プロジェクトを更新するときは SDK / CLI とも latest を候補にし、build と CLI help を再検証する
+npm install @microsoft/power-apps@latest
+npm install -D @microsoft/power-apps-cli@latest
+npx pa --help          # ★ bin 名は pa。コマンドは auth / app / connector / connection / solution の group 制
+npm run build
+# バージョン方針と検証項目: references/cli-reference.md#バージョン方針
+
+# Step 1: ソリューションを用意し、SOLUTION_ID / SOLUTION_NAME / PUBLISHER_PREFIX を .env に保存
+# standard / dataverse スキルで承認済みのものを使う。初回 push 前に GUID を確定する。
+
+# Step 2: npm CLI の認証先を確認して初期化
+npx pa auth status
+npx pa auth switch --account user@contoso.com
+npx pa app init --environment-id {ENVIRONMENT_ID} --display-name "AppName" --app-type CodeApp
+
+# Step 3: vite.config.ts 必須設定を確認（base: "./" / external に @microsoft/power-apps を含めない）
+#         → references/build-reference.md Step 2
+
+# Step 4: 作成済み .env を保持し、.env.example を参照してテーマ固有の不足値を補う
+
+# Step 5: 初回ビルド＆デプロイ — ★必ず -s を付ける（almMode が Solution になるのは初回 push だけ）
+#         対象環境は power.config.json の environmentId を使う（push には --environment-id が無い）
+npm run build
+npx pa app push --solution-id {SOLUTION_ID}
+
+# Step 6: Dataverse コネクタを 1 回追加（全テーブル共通・接続参照バインド）
+# ここからは初期化済みアプリのルートで実行。スキルが別階層ならスクリプトのパスを読み替える。
+# 専用接続の作成とブラウザ認証・Edge プロファイルの承認を得てから実行。
+python .github/skills/code-apps/scripts/setup_connection_reference.py \
+  --create-connection --allow-interactive --write-env .env
+# 作成済み接続を使う場合は --create-connection の代わりに --connection-id {APPROVED_CONNECTION_ID}。
+python .github/skills/code-apps/scripts/add_data_source.py --connector dataverse --allow-interactive
+
+# Step 7: src/ を実装（MicrosoftDataverseService を薄くラップ）
+#   業務ロジックに入る前に 1 回 predeploy を通し、config.ts と router.tsx の不整合を早期検知する
+npm run predeploy
+#   → 以降はページを追加するたびに実行する（ナビとルートの不一致はデプロイ後にしか見えない）
+
+# 再ビルド＆デプロイ（反復）
+npm run build
+npx pa app push
+
+# Step 8: 最終 push 後に共有（カンマ区切りで複数指定可）
+#   共有先環境は power.config.json で決まる（share に --environment-id は無い）
+npx pa app share --principal "${CODE_APP_PLAY_PRINCIPALS}" \
+  --access play --non-interactive --json
+```
+
+共有対象のユーザー／サービスプリンシパル、`edit` の最小権限ルール、CI/CD 例は
+[npm CLI リファレンスの `app share`](references/cli-reference.md#app-share)を参照する。
+
+> **Step 5 の `--solution-id` は後戻りできない**: 初回の `pa app push --solution-id` がアプリを `almMode: Solution` にするのは
+> **`appId` 未割当の初回 push のみ**。`almMode: Environment` で作ってしまったアプリは、後から `-s` を付けて
+> push してもソリューションに入らず、Power Apps ポータルの「既存の追加 → アプリ → コード アプリ」でしか
+> 復旧できない。詳細は [ソリューション ALM リファレンス](references/solution-alm.md)。
+
+> **`-s` に渡す値は CLI で違う**: `pac code push -s` はソリューション**名**だが、
+> `npx pa app push -s` は **GUID** を要求する（CLI 0.13.0 で GUID 検証が入り、名前はエラーになった）。
+> 詳細は [ソリューション ALM](references/solution-alm.md)。
+
+> **インポート／ラッパーの必須パターン**: 生成された `MicrosoftDataverseService` を薄いラッパーで包み、`ListRecordsWithOrganization` / `CreateRecordWithOrganization` / `GetItemWithOrganization` / `UpdateRecordWithOrganization` / `DeleteRecordWithOrganization` に **Dataverse URL（organization）を必ず渡す**。`organization` を省略すると `Invalid organization URL 'null' provided` で失敗する。詳細は [ビルドリファレンス](references/build-reference.md) を参照。
+
+### デプロイコマンドの選択
+
+| コマンド | 認証基盤 | テナント問題 | 推奨度 |
+|---|---|---|---|
+| `python scripts/setup_connection_reference.py` | auth_helper + npm CLI（接続の正常性照合） | 対象環境を照合 | ✅ 標準（専用接続を作る場合は init 後） |
+| `npx pa auth status` / `pa auth switch --account {UPN}` | Power Apps npm CLI | アクティブアカウントを明示 | ✅ テナント切り替え時に必須 |
+| `npx pa app init --environment-id {ID} --display-name "Name" --app-type CodeApp` | Power Apps npm CLI | 上記で確認 | ✅ 標準 |
+| `npx pa app push --solution-id {GUID}` | Power Apps npm CLI | 上記で確認 | ✅ 標準（**初回から GUID 必須**。環境は power.config.json から） |
+| `npx pa app add data-source --connector shared_commondataserviceforapps --connection-ref {CR} --solution-id {GUID} --org-url {url}` | Power Apps npm CLI + 接続参照 | `pa auth` が別キャッシュ | ✅ 標準（ALM 対応） |
+| `npx pa app add data-source ... --connection-id {id}` | Power Apps npm CLI + 接続 | 同上 | △ ソリューションに入らない（PoC のみ） |
+| `pac code *` | PAC CLI プロファイル | npm CLI と別キャッシュ | △ npm CLI で解決できない場合のみの移行時代替 |
+| `npm run deploy -- --solution-id {GUID}` | Power Apps npm CLI | auth switch で切り替え | ✅ 初回デプロイに推奨（predeploy チェック付き） |
+
+### CI/CD・秘匿化（チーム開発で継続的にデプロイする場合）
+
+`.env` の秘匿化・`${VAR}` テンプレートの汎用化・pre-commit ゲート・レビューゲート・
+承認付きデプロイ・リリース記録は **`alm` スキル** が担当する。
+`npm run deploy` を `alm` のデプロイジョブに差し込むだけで、同じ ALM 基盤に載せられる。
+
+#### Code Apps での `alm` 実行可否チェック（最小検証）
+
+```bash
+# 1) ALM スクリプトと設定雛形を取り込む
+cp .github/skills/alm/scripts/*.py scripts/
+cp .github/skills/alm/alm.config.example.json alm.config.json
+
+# 2) Code Apps 用にパス定義を最小調整（例）
+#    templates: ["power.config.template.json"]
+#    rendered : ["power.config.json"]
+#    artifacts: ["dist/**"]
+#    non_secret_vars: ["APP_NAME"]
+
+# 3) 決定論ゲートを実行
+python scripts/review_sanitization.py
+python scripts/gate_rules.py --gate quality --out .gate/quality.json
+python scripts/gate_rules.py --gate generalization --out .gate/generalization.json
+python scripts/review_report.py --verdict-dir .gate --out .gate/review-report.md
+```
+
+#### 運用モジュール（選択式）
+
+| モジュール | 構成 | 使うとき |
+|---|---|---|
+| `pp-only` | Power Platform 単体（PAC CLI + `npm run deploy`） | まず Code Apps 単体で ALM を確立したい |
+| `pp-azure-gha` | GitHub Actions + Azure（OIDC） | GitHub 中心で Azure 連携も必要 |
+| `pp-azure-ado` | Azure DevOps + Azure（WIF） | Azure DevOps の承認・監査を使いたい |
+
+モジュール別の詳細は [`alm/references/ci-providers.md`](../alm/references/ci-providers.md) を参照。
+
+→ 詳細: [`alm`](../alm/SKILL.md) スキル
+
+### 接続方式の比較
+
+| 比較対象 | 参考 |
+|---|---|
+| `shared_commondataserviceforapps` を 1 回追加して `MicrosoftDataverseService` を共有する方式 | [connector-reference.md](references/connector-reference.md), [build-reference.md](references/build-reference.md) |
+| `pac code add-data-source -a dataverse -t <table-logical-name>` をテーブル単位で追加する方式 | [Microsoft Learn: How to: Connect your code app to Dataverse](https://learn.microsoft.com/en-us/power-apps/developer/code-apps/how-to/connect-to-data), [Microsoft Learn: Troubleshoot adding a data source](https://learn.microsoft.com/en-us/power-apps/developer/code-apps/troubleshoot-add-datasource) |
+
+> [!NOTE]
+> **Microsoft Learn との比較**: Learn の現行ガイド「How to: Connect your code app to Dataverse」（2026-04-07 更新）と
+> 「Troubleshoot adding a data source」（2026-02-02 更新）は、どちらも
+> `pac code add-data-source -a dataverse -t <table-logical-name>` を Dataverse 追加の基本手順として説明している。
+> このスキルの `shared_commondataserviceforapps` 手順は **このリポジトリで採用する connector-first パターン**であり、
+> Learn の基本手順をそのまま置き換えたものではない。判断基準は次のとおり:
+>
+> - **Learn / PAC 標準**: テーブルごとの型付き Service / Model を生成したい
+> - **本スキル標準**: 1 回の接続で `MicrosoftDataverseService` を生成し、`entityName` で複数テーブルを横断したい
+> - **性能面**: Microsoft Learn に両者の明確なベンチマーク差は記載されていない。通常は Dataverse 側のクエリ形状
+>   （`$select` / `$filter` / `$top`）、ページング、ネットワーク待ちの影響が支配的で、接続方式そのものの差は主因になりにくい
+> - **実務上の判断**: 性能よりも、型安全性・再生成コスト・複数テーブル横断のしやすさで選ぶ
+
+## 3. データソース接続
+
+### 正常系: 初回に認証設定を保存し、更新時はキャッシュ優先
+
+最初に本人の使用アカウント・Edgeプロファイル・必要時の追加認証への継続許可を確認する。
+確認済み設定はアプリの Git 除外済み `.env` に保存し、同一タスクで聞き直さない。
+`PP_AUTH_MODE=browser` / `PP_AUTH_ACCOUNT` / `PP_AUTH_EDGE_PROFILE` /
+`PP_AUTH_ALLOW_INTERACTIVE=true` が保存対象。トークン・パスワード・Cookie は保存しない。
+
+```powershell
+# 初回: 承認済み UPN と edge://version のプロファイルパス末尾を指定する
+python .github/skills/code-apps/scripts/setup_code_app_auth.py `
+  --account <approved-upn> --edge-profile "Profile N" --approve-interactive
+# app init 後にも同コマンドを再実行して接続一覧の resource までキャッシュを確認する
+# 更新前の読み取り専用確認（push しない）
+python .github/skills/code-apps/scripts/deploy_code_app.py --check-auth
+# デプロイ承認後: predeploy → deploy。保存済み設定でサイレント優先
+npm run predeploy
+npm run deploy
+```
+
+Python共有キャッシュとnpm CLIキャッシュは別のクライアントが管理するため、双方を初回に確認する。
+PythonはWindowsの指定Edgeプロファイルで認証する。npm CLIはOS既定ブラウザーを開き、
+プロファイル指定機能はないため、保存したプロファイルを表示し本人に選択してもらう。
+強制適用できたと報告しない。設定の詳細は [認証運用](references/authentication-lifecycle.md)。
+
+時間経過・失効・条件付きアクセスによる追加認証も正常フローに含める。
+保存済み許可があれば毎回の `--allow-interactive` は不要。まずキャッシュから取得・サイレント更新し、
+追加認証が必要な場合だけブラウザーへ一度切り替え、本人のサインイン後に続行する。
+CIでは保存済み許可・明示フラグがあってもブラウザーを開かない。
+403・通信障害・タイムアウトでは再認証や書き込み再試行を行わず停止する。
+認証の許可はデプロイや接続作成の許可とは別。キャッシュ寿命延長やMFA省略を保証しない。
+
+### MCP Server は Copilot Studio 経由に統一する
+
+Code App に MCP カスタムコネクタを直接追加しない。会話・検索・原本取得は
+`Code App → Copilot Studio → MCP Server`、画面表示用の構造化データやページ画像は
+`取り込み処理 → Dataverse → Code App` と分離する。画像や大きなバイナリをエージェント応答へ載せない。
+
+同じ MCP 接続が Code App の同意一覧へ重複すると、接続更新ボタンが反応せずモーダルが閉じないことがある。
+誤って追加した場合は SDK 管理ファイルを手編集せず、CLI で削除する。
+
+```powershell
+npx pa app remove data-source --connector <shared_mcp_connector_id> --force --non-interactive
+```
+
+標準 `pre-deploy-check.mjs` は `.power` と `src/generated` の `/api/mcp` / `InvokeServer` を検出し、
+直接 MCP データソースが残ったデプロイを拒否する。詳しい切り分けは
+[トラブルシューティング](references/troubleshooting.md) を参照する。
+
+### 正常系: コネクタ ID は聞かずに解決する（`add_data_source.py`）
+
+`npx pa app add data-source` はコネクタ ID や接続を省略すると **対話プロンプトで停止**し、
+スクリプト実行・CI・エージェント実行が入力待ちのまま固まる。これを避けるため、
+データソース追加は次のラッパーを**正常フロー**とする。コネクタは「SharePoint」「Outlook」などの
+**通称で指定でき、スクリプトが `shared_xxx` に解決**してから `--non-interactive` で CLI を起動する。
+
+```powershell
+# SharePoint（直接接続・継続利用を明示された場合だけ。URL の提示だけでは実行しない）
+python .github/skills/code-apps/scripts/add_data_source.py --connector sharepoint `
+  --dataset "{SITE_URL}" --table "{LIST_ID}"
+# ファイル作成などの操作はテーブルとは別に --as action で追加する（troubleshooting #57）
+python .github/skills/code-apps/scripts/add_data_source.py --connector sharepoint --as action `
+  --connection-ref {CONNECTION_REFERENCE_LOGICAL_NAME} --solution-id {SOLUTION_ID}
+
+# Dataverse（ALM 標準: 接続参照バインド。--org-url は .env の DATAVERSE_URL を既定値にする）
+python .github/skills/code-apps/scripts/add_data_source.py --connector dataverse `
+  --connection-ref {CONNECTION_REFERENCE_LOGICAL_NAME} --solution-id {SOLUTION_ID} --allow-interactive
+
+# 使えるコネクタの通称一覧 / 実行せずコマンドだけ確認
+python .github/skills/code-apps/scripts/add_data_source.py --list-connectors
+python .github/skills/code-apps/scripts/add_data_source.py --connector teams --dry-run
+```
+
+| 解決すること | 方法 |
+|---|---|
+| コネクタ ID | [コネクタ ID カタログ](../standard/references/connector-catalog.json) の通称・別名で解決。無ければ `pa connector list --search` で環境から解決 |
+| バインド先 | `--connection-ref` + `--solution-id`（ALM 標準）。未指定なら `pa connection list` で接続を 1 つに絞れたときだけ自動選択 |
+| 追加値 | `--org-url` / `--dataset` / `--table` / `--procedure`。コネクタごとの必須項目はカタログの `requires` |
+
+> **ハングしない仕組み**: CLI は必ず `--non-interactive` かつ **標準入力を閉じた状態**で起動し、
+> `--timeout`（既定 600 秒）を超えたら停止する。値が足りないときはプロンプトを出さずに
+> `NG:` と不足項目・取得コマンドを表示して終了コード 1 で止まる。
+> **候補が複数のときも勝手に選ばず**、候補一覧を出して止める（誤ったコネクタへのバインドを防ぐため）。
+
+**正常系の接続準備**: アプリのルートで `.env` と `power.config.json` の環境を照合し、
+`setup_connection_reference.py --create-connection --allow-interactive --write-env .env` で専用接続を用意する。
+承認済みの既存接続なら `--connection-id` を使う。`Connected`・コネクタ・環境・参照のバインド・
+ソリューション所属を読み戻してから `.env` へ保存する。同名・同一バインドは再利用し、異なるバインドは変更しない。
+`--allow-interactive` は本人の認証と Edge プロファイルの事前承認がある場合のみ使用する。
+通常は非対話、認証が必要な実コマンドだけ Windows の別コンソールへ切り替え、タイムアウト付きで終了を確認する。
+`auth status` / `auth login` の成功を接続参照解決の成功とは扱わない。
+CLI はインストール済みの公式パッケージを Node.js で直接実行し、生成サービス・設定を検証する。
+ビルド、バックエンド CRUD、配信後の画面 CRUD は別々に記録する。
+
+> **カタログに無いコネクタ**: `--connector shared_xxx` のように ID を直接渡せばそのまま通る。
+> 繰り返し使うものは [connector-catalog.json](../standard/references/connector-catalog.json) に
+> `id` / `displayName` / `aliases` / `requires` を追記する（他スキルの DLP 事前チェックでも同じ通称が使える）。
+
+### Microsoft Dataverse connector（`shared_commondataserviceforapps`）
+
+Dataverse 接続は **`shared_commondataserviceforapps` を 1 回だけ追加する方式を標準**とする。これにより、テーブルごとに `add data-source` を繰り返さなくても、生成された `MicrosoftDataverseService` から `entityName` を実行時に渡して全テーブルへ CRUD できる。
+
+`npx pa app add data-source --connector shared_commondataserviceforapps` を 1 回実行すると、`.power/schemas/appschemas/dataSourcesInfo.ts` に加え `src/generated/services/MicrosoftDataverseService.ts` と `src/generated/models/MicrosoftDataverseModel.ts` が生成される。アプリ側ではこの生成サービスを薄いラッパーで包み、`organization` に対象環境の Dataverse URL を明示的に渡す。
+
+バインド先は **接続 ID ではなく接続参照（`--connection-ref`）を標準**とする。接続はソリューション コンポーネントになれないが、接続参照はなれるため、環境間移送ができる。
+
+```bash
+# Step 6 で作成済みの接続参照にバインドする（add_data_source.py が内部で実行するコマンド）
+npx pa app add data-source --connector shared_commondataserviceforapps \
+  --connection-ref {CONNECTION_REFERENCE_LOGICAL_NAME} \
+  --solution-id {SOLUTION_ID} \
+  --org-url {DATAVERSE_URL} \
+  --non-interactive
+```
+
+接続参照にしても **「1 回の追加で全テーブルをカバーする」設計は変わらない**（`--connector` はコネクタ単位。生成ファイル 2 つ・生成メソッド同一・アプリコード変更不要）。`power.config.json` には `xrmConnectionReferenceLogicalName` が 1 行追加されるだけである。検証結果と確認コマンドは [ソリューション ALM リファレンス](references/solution-alm.md)。
+
+> **接続参照は CLI では作れない**: `--connection-ref` に未存在の論理名を渡すと
+> `Failed to resolve connection ID for reference '...'` で失敗する（自動作成されない）。
+> ポータル手作業を避けるため、Step 1 の
+> [setup_connection_reference.py](scripts/setup_connection_reference.py)（Dataverse Web API）を標準とする。
+
+> **`add data-source` に `--environment-id` は渡せない**: `--help` には載っているが実際には
+> `error: unknown option '--environment-id'` で拒否される。対象環境は `power.config.json` から読まれる。
+> 同じく `pa app push` も `-e` / `--environment-id` を拒否する。
+
+> **PoC やソリューション不要の場合のみ**、`--connection-ref {CR} --solution-id {SOLUTION_ID}` を
+> `--connection-id {DATAVERSE_CONNECTION_ID}`（`npx pa connection list` で取得）に置き換えてもよい。
+> ただしそのデータソースはソリューションに入らず、環境間移送できない。
+
+Lookup 列の書き込みは従来どおり `parentcustomerid_account@odata.bind` のような `@odata.bind` 形式を使う。`organization` を省略した通常メソッドは `Invalid organization URL 'null' provided` で失敗しやすいため、`*WithOrganization` 系メソッドを使う。
+
+> **旧方式の扱い**: `pac code add-data-source -a dataverse -t {table}` によるテーブル別の強い型付け生成は、既存プロジェクト互換やテーブル単位の Service が必須な場合のみに限定する。日本語 DisplayName 対策など旧方式の補足は [日本語サニタイズリファレンス](references/japanese-sanitize.md) を参照。
+
+## 4. 改善デプロイ
+
+### CSP（Content Security Policy）違反の回避
+
+Power Apps ランタイムはデフォルトで `connect-src 'none'`。外部 API への `fetch` はブロックされる。
+Code Apps が生成する Dataverse SDK / `MicrosoftDataverseService` のような **Power Apps ランタイム経由の API** のみ CSP 安全。
+
+iframe 埋め込み（地図・PDF ビューア等）を入れる場合は、**デプロイする前に** CSP を確認・追加する。
+
+```powershell
+# 不足があれば終了コード 1（デプロイ前チェック）
+python .github/skills/code-apps/scripts/configure_code_app_csp.py `
+  --directive Frame-Src --source https://www.google.com --assert
+```
+
+`npm run predeploy` のチェック 13（`scripts/detect-csp-hazards.mjs`）は、既定 CSP で**エラーを出さずに動かないだけ**になる書き方
+（`fetch` / `XMLHttpRequest` / `WebSocket` / three.js などのローダー / `Worker` / Draco・KTX2 / `blob:` 画像）をデプロイ前に止める。
+CSP を追加した環境では `.env` に `CODE_APP_CSP_ALLOW=connect-src` のように書いて外す。
+
+→ 詳細: **[CSP 構成](references/csp.md)**
+
+### マイク・録音・音声ストリーミング
+
+マイクは使えるが、`AudioContext` はクリック ハンドラ内（`await` より前）で開始する。1 本の `MediaStream` を録音と PCM 変換で共有し、
+PCM 変換は `public/` に置いた同一オリジンの AudioWorklet で行う。音声系 SDK にはマイクを直接渡さず Push ストリームで PCM を渡し、
+`data:` Worker を使う SDK 機能は無効にする（Azure AI Speech は `WebWorkerLoadType=off`。放置すると文字起こしが無言で止まる）。
+録音の再生は `data:` URL、WebSocket は `connect-src` に `wss://` を追加する。
+ホストの条件はローカルで再現して試験できる（別オリジン iframe + 既定 CSP + 疑似マイク）。
+
+→ 詳細: **[デバイス・メディア](references/device-media.md)** / **[ホスト再現テスト](references/host-emulation-testing.md)**
+
+### ログインユーザーの systemuserid 取得
+
+SDK 1.5+ の `getContext().user.systemUserId` を優先する。古い host で省略された場合だけ
+`user.objectId`（Entra AAD Object ID）を取得し、`systemuser` テーブルの
+`azureactivedirectoryobjectid` でマッピングして `systemuserid` を解決する。
+`Xrm`・`fetch`・`executeAsync` は CSP でブロックされるため使用不可。
+
+→ 詳細: **[ユーザー識別リファレンス](references/user-identity.md)**
+
+### ディープリンク: 外部から Code Apps の特定ページに遷移
+
+SDK の `getContext().app.queryParams` で親ウィンドウの URL パラメータを取得する（cross-origin iframe のため `window.location.search` は不可）。
+
+→ 詳細: **[ディープリンクリファレンス](references/deep-link.md)**
+
+### 基本設計方針: モーダル操作 + z-index ルール
+
+**新規作成・編集・削除はすべてモーダル（Dialog / AlertDialog）で操作する。**
+サイドバー z-40 / Dialog z-[300]/z-[400] で重なり問題を回避。
+
+### SDK 生成サービスとデータソースパターン
+
+フロー連携時は統合 `dataSourcesInfo` が必須（Dataverse connector・フロー・Copilot Studio を同居させる場合、最初に解決されるデータソース定義へ必要なエントリをそろえておく）。
+
+→ 詳細: **[データソースパターン](references/data-source-patterns.md)**
+
+### 環境接続前のモックデータ開発
+
+取得系画面は `createMockDataExecutor` でローカル確認できる。モックは `import.meta.env.DEV` と
+`VITE_USE_MOCK=1` の両方で制限し、動的 import して本番成果物から除去する。
+SDK 1.2.7 の標準 executor は作成・更新・削除をサポートしないため、書き込み成功のテストには使わない。
+
+→ 詳細: **[モックデータ開発パターン](references/mock-data-pattern.md)**
+
+### Lookup 名はクライアントサイド名前解決が必須
+
+SDK 生成サービスは Lookup 名フィールド（`createdbyname` 等）を返さない。
+`_xxx_value`（GUID）+ `useMemo` マップで名前解決する。
+データソース未登録テーブルの場合は OData FormattedValue アノテーションを使う。
+**所有者（「誰のレコードか」）の表示は `_owninguser_value` + `systemusers` Map で解決する**（取得 hook の `$select` に `_owninguser_value` を含めること）。
+
+→ 詳細: **[Lookup 名前解決リファレンス](references/lookup-resolution.md)**
+
+### 一覧の検索・フィルター・重要列（所有者・金額）
+
+営業系の一覧は名称検索だけで終わらせず、**所有者列・金額列などの重要項目を表示し、ステータス／所有者で絞り込み・横断検索できる**構成を標準とする。所有者フィルターは実データに存在する所有者のみを列挙し、絞り込み結果の件数・合計をツールバーに表示する。
+
+→ 詳細: **[CRUD UI 標準パターン](references/crud-ui-pattern.md)** の「一覧の検索・フィルター・重要列」
+
+### ステージ矢羽（Stage Path）— OptionSet の進捗を可視化＆クリックで変更
+
+商談ステージ・リードステータス等、順序を持つ OptionSet を Salesforce 風の矢羽（シェブロン）で表示する。`onSelect` でその場ステージ変更（patch）も可能。失注・不認定など否定的終端は `negativeValue` で赤表示。
+
+既定は通常テーブルのChoice列でありBPFではない。`sales-crm` の構築スクリプトは
+`IsBPFEntity=false`・`TableType=Standard`・ステージ列のPicklist型を構築前に検証する。
+Code AppsもCopilot Studioも商談本体のステージ列を更新し、自動進捗履歴を直接編集しない。
+
+→ 詳細: **[ステージ矢羽パターン](references/stage-path-pattern.md)**
+
+### 使い方ガイド（オンボーディング）— 全アプリ標準
+
+**画面が 3 つ以上あるアプリには、指示がなくても使い方ガイドを実装する。** 初回起動時にカルーセル（4〜6 枚）を自動表示し、「使い方を見る」で**実際の画面を操作しながら案内するツアー**へ繋ぐ。2 回目以降はサイドバー／ヘッダーのボタンから任意に開く。
+
+- 定義は `src/guide-config.ts` の `GUIDE_SLIDES` / `TOUR_STEPS` に集約し、画面側は `data-tour="..."` を足すだけにする
+- Context とフックは `guide-context.ts`（`.ts`）に分離する。`guide-provider.tsx` に混ぜると `react-refresh/only-export-components` で lint が落ちる
+- `autoClick` に削除・送信など破壊的操作を指定しない
+
+→ 詳細: **[使い方ガイドパターン](references/onboarding-guide-pattern.md)**
+
+### scaffold できるテンプレート
+
+`templates/*/scaffold.json` を持つ全テンプレートは、`update-skills` の共通スキャフォールダーで取得する。
+まず `--dry-run` でコピー対象と `Next` を確認し、問題なければ外して実行する。
+
+```powershell
+python .github/skills/update-skills/scripts/scaffold_from_template.py `
+  --template .github/skills/code-apps/templates/<template-name> `
+  --target <出力先> --dry-run
+```
+
+| テンプレート | 種別 | 開始方法 |
+|---|---|---|
+| [templates/generic-base](templates/generic-base/) | 完全なベース | 新規プロジェクトの出力先へ生成する |
+| [templates/sales-crm](templates/sales-crm/README.md) | 完全な業務テンプレート（generic-base を `extends`） | 営業支援 CRM（マネージャー ダッシュボード・営業ホーム・CRUD・Outlook/Teams/Cowork 連携）を空のディレクトリから生成する |
+| [templates/construction-cockpit](templates/construction-cockpit/README.md) | 完全な業務テンプレート（generic-base を `extends`・Copilot Studio エージェント同梱） | 建設現場コックピット: Google Maps の工事ポートフォリオ、Three.js の進捗 3D（工事種別 6 種・完成形の点線・CAD の GLB/OBJ/STL/FBX 取り込みと施工単位の対応付け・施工位置イメージ）、React Flow ガント/因果関係、工事・ユーザーの Dataverse 検索ドロップダウン、監督の承認待ち（日報・現場写真・進捗の下書き）、KY・ヒヤリハット・日報・ナレッジのグラフ付き一覧と詳細、KY の AI 危険予測（Dataverse 要求/結果 + Workflow）、Copilot Studio「現場コックピット アシスタント」（Teams での日報と写真の報告・施工単位での進捗報告・まとめ登録・承認）、Cowork、本格デモデータを生成する |
+| [templates/perse3d-studio](templates/perse3d-studio/README.md) | 完全な業務テンプレート（generic-base を `extends`・Blender パイプライン・カスタム コネクタ同梱） | パース3D内見スタジオ: 間取り図・パース・物件 URL から 3D 建物を生成し、内見（ドールハウス・歩行・階段）・家具配置・提案プラン・Blender 出力まで行う。データソース追加前でもビルドでき（生成サービスは遅延読み込み）、`npm run deploy` の predeploy がデータソースの実在を確かめる |
+| [templates/agm-qa-assist](templates/agm-qa-assist/README.md) | 完全な業務テンプレート（generic-base を `extends`・Azure Functions 同梱） | 株主総会 Q&A アシスト（連続の文字起こし・株主の AI 照合・想定問答の検索と根拠つき回答案・録音と記録・総会の集計・LIVE 共有）。**変数は `--questions` の順に AskUserQuestion で聞いてから生成**する |
+| [templates/store-ordering](templates/store-ordering/README.md) | 完全な業務テンプレート（generic-base を `extends`・Dataverse 8 テーブルと合成デモデータの生成器を同梱） | 店舗発注システム: 小売店の発注端末を模した業務端末風 UI（F1〜F10 キー・単品発注 → 確認 → 送信・発注照会と取消・在庫照会・天気と催事）。単位（個・本・パック）つきの合成データ（50 品目 × 90 日・シナリオ切り替え）を Dataverse に作る。Cowork の店長アシスト（cowork スキルの `templates/store-assist-plugin`）と同じテーブル。データソース追加前でもビルドできる遅延版クライアント。**変数は `--questions` の順に AskUserQuestion で聞いてから生成**する |
+| [templates/account-link-admin](templates/account-link-admin/) | アドオン | 空の作業ディレクトリへ生成し、README に従ってホストへ統合する |
+| [templates/drawing-communication](templates/drawing-communication/) | アドオン | 空の作業ディレクトリへ生成・単体検証後、必要なモジュールをホストへ統合する |
+| [templates/modular-plant](templates/modular-plant/) | アドオン | 空の作業ディレクトリへ生成・単体検証後、必要なモジュールをホストへ統合する |
+
+アドオンをホストのルートへ `--force` で直接重ねると `README.md` や `package.json` を上書きし得るため、
+必ず独立した出力先へ生成してから統合する。
+
+`samples/geek-*` は**業務ページ実装の参照専用**で、scaffold 元にはしない
+（業務固有のページ・型・サービス、および `samples/geek-sales` の `CommandPalette` / `QuickActivityFab` のような
+テーマ固有コンポーネントが混入するため）。営業支援を始める場合は `templates/sales-crm` を使う。
+
+> **業務テンプレートはデータソース追加前にビルドできること**: 初回 push（Step 5）は add data-source（Step 6）より前に
+> build するため、生成サービスを静的 import すると空のディレクトリからの初回デプロイが型エラーで止まる。
+> `templates/sales-crm/src/lib/dataverse-client.ts` のように `import.meta.glob("../generated/services/MicrosoftDataverseService.ts")`
+> で遅延解決し、未追加時は画面に追加手順を出す。
+
+> **`npx pa` は `--no` を付ける**: ローカルに `pa`（`@microsoft/power-apps-cli` v1 以降の bin）が無い状態で `npx pa` を実行すると、
+> npm 上の**無関係なパッケージ `pa`** を取得して実行する（依存未導入・旧 CLI 0.x のままで起きる）。手動実行は `npx --no pa ...`、
+> npm scripts では `pa app push` を直接呼ぶ。`npm run predeploy` のチェック 12 がこの状態を検出する。
+
+外部 API 呼び出しを含むデモページ（`design-examples.tsx` / `use-learn-catalog.ts` / `learn-client.ts` 等）は CSP 違反になるため、業務テーマに不要なものは最初から生成しない。標準コンポーネント（`form-modal.tsx` / `list-table.tsx` / `inline-edit-table.tsx` / `sidebar*.tsx` / `ui/` 等）は残す。
+
+→ 含める／含めないファイルの完全な一覧は **[新規テーマ開始チェックリスト](references/new-theme-checklist.md)**。
+
+### アドオンテンプレート（generic-base に重ねる差分）
+
+`templates/` には完全な `generic-base` に加えて、**特定業務の画面だけを差分ファイルとして重ねるアドオン**を置く。
+アドオンは独立した作業ディレクトリへ scaffold し、README の手順どおり必要なファイル、依存、ルート、ナビを統合する。
+
+| アドオン | 用途 | 使う場面 |
+|---|---|---|
+| [templates/account-link-admin](templates/account-link-admin/) | `contact` に `account`（取引先企業）を割り当てる管理画面 | Power Pages で **Account アクセス**を選んだとき（[power-pages スキル](../power-pages/SKILL.md) Step 4-G）。必須 |
+| [templates/drawing-communication](templates/drawing-communication/) | 図面の注釈・改訂・非同期会話 | 図面レビュー機能を既存 Code Apps に追加するとき |
+| [templates/modular-plant](templates/modular-plant/) | JSON 駆動の設備配置・接続・候補生成 | プラント概念設計を既存 Code Apps に追加するとき |
+
+### SDK に触れる面を 1 ファイルに閉じる
+
+`@microsoft/power-apps` は 2〜4 週ごとに更新され、マイナーバージョンでも破壊的変更が入る。
+影響範囲を押さえるため、**SDK を import してよいのは `src/lib` / `src/services` / `src/providers` の 3 階層だけ**とし、
+ページ・コンポーネントからは直接呼ばない（`validate_sample.py` が検出する）。
+
+SDK 1.4+ では elastic table の update／delete／file 操作と `IOperationOptions` に
+optional `partitionId` が追加された。standard table では省略し、elastic table では対象レコードと同じ
+partition ID を service 層から渡す。SDK 1.5+ のユーザー識別は下記の `systemUserId` 優先パターンを使う。
+
+Dataverse CRUD ラッパーは **[templates/dataverse-client.ts](templates/dataverse-client.ts) を正**とし、手書きせずコピーして使う。
+検索ボックス・ドロップダウンは同ファイルの `Search`（Dataverse 検索）を使う（[Dataverse 検索のドロップダウン](references/dataverse-search.md)）。
+
+```bash
+cp .github/skills/code-apps/templates/dataverse-client.ts src/lib/
+```
+
+SDK の破壊的変更への追従は、この 1 ファイルを直して `python scripts/sync_dataverse_client.py` で配布する。
+
+> [!NOTE]
+> `templates/generic-base` にはこのファイルを同梱していない。
+> `@/generated/services/MicrosoftDataverseService` に依存しており、`add-data-source` 前の状態では `tsc -b` が通らないため。
+> Step 6 で接続を追加した後にコピーする。
+>
+> `samples/geek-asset` / `geek-hr` / `geek-expense` / `geek-sales` / `geek-fieldservice` は、このラッパーではなく
+> `getClient()` の `*Async` 系・テーブル別生成サービスを使う別パターンの参照実装。上記 3 階層の制約は同じく適用される。
+
+### 3D モデル（GLB）を読む面も 1 ファイルに閉じる
+
+GLB を読むときは **[templates/csp-safe-gltf.ts](templates/csp-safe-gltf.ts) をコピーして `createCspSafeGltfLoader()` を使う**（`new GLTFLoader()` を直接使わない）。
+既定 CSP は `blob:` を `img-src` / `connect-src` で拒否するため、素の GLTFLoader では埋め込みテクスチャが黙って落ちる（troubleshooting #73）。
+同じファイルを使う実装: `samples/plant-design-maintenance/src/lib/csp-safe-gltf.ts`。
+
+```bash
+cp .github/skills/code-apps/templates/csp-safe-gltf.ts src/lib/
+```
+
+### 構築手順の詳細
+
+詳細な構築手順（初期化・Dataverse 接続・ビルド・デプロイ）は [構築リファレンス](references/build-reference.md) を参照。
+
+### TanStack React Query パターン
+
+自前 `MicrosoftDataverseService` ラッパーを React Query で包むパターン（`useRecords` / `useCreateRecord` 等）は [構築リファレンス](references/build-reference.md#step-6-microsoftdataverseservice-ラッパーで-crud-実装) を参照。
+
+### プレデプロイレビュー（「デプロイして」「プッシュして」時の必須チェック）
+
+「デプロイして」「プッシュして」が指示されたとき、ビルド前に必ずレビューを実行する。
+`dataSourcesInfo` 整合性・インポート元・ルーター種別（createHashRouter 必須）・サイドバー fixed レイアウト等を確認。
+
+→ 詳細: **[プレデプロイレビューリファレンス](references/pre-deploy-review.md)**
+
+### ビルド・デプロイの注意事項
+
+- `noUnusedLocals: true` のため未使用 import は即削除
+- PowerShell で `npm run build 2>&1` の後にテキストを付けない（Vite が入力パスと誤解）
+
+→ 詳細: **[ビルドリファレンス](references/build-reference.md)**
+
+### Power Automate フロー統合
+
+フロー追加は `npx pa app add flow --flow-id {id}` を使う（`add data-source --connector logicflows` は旧方式）。
+Copilot Studio 応答は JSON 配列文字列で返るため `JSON.parse()` → 配列の最初の要素を取得する。
+502 タイムアウト対策としてローカル検索へのフォールバックを必ず実装する。
+
+→ 詳細: **[フロー連携リファレンス](references/flow-integration.md)**
+
+---
+
+## 5. リファレンス
+
+正常系の流れは本ファイル（§1〜§4）に集約し、**異常系・詳細手順・トラブルシューティングは references/ に逃がしている**。各トピックの詳細は以下を参照。
+
+| リファレンス | 内容 |
+|---|---|
+| [デザインテンプレート集](references/design-templates.md) | 設計時に選択する配色テンプレート 6 種（プレビュー HTML・CSS Variables 一式・light/dark 対応） |
+| [デザインシステム](references/design-pattern.md) | Tailwind CSS v4 のコンポーネント選定・画面設計パターン |
+| [コンポーネントカタログ](references/component-catalog.md) | 全コンポーネントの詳細仕様・使用例 |
+| [ステージ矢羽パターン](references/stage-path-pattern.md) | OptionSet（ステージ／ステータス）を Salesforce 風の矢羽で可視化・クリックで変更 |
+| [使い方ガイドパターン](references/onboarding-guide-pattern.md) | 初回起動のカルーセル＋実操作ツアー（`data-tour` 属性・localStorage 初回判定・スポットライト・全アプリ標準） |
+| [月間カレンダーパターン](references/calendar-pattern.md) | 日付を持つレコードを月間グリッドで俯瞰（date-fns のみ・依存追加なし・イベントチップ・今日ハイライト） |
+| [ウィザードフォームパターン](references/wizard-form-pattern.md) | 入力項目の多いフォームを複数ステップに分割（ステップインジケーター・ステップ別バリデーション・確認画面） |
+| [CSV エクスポートパターン](references/csv-export-pattern.md) | フィルター適用後の一覧を UTF-8 BOM 付き CSV でダウンロード（Excel 日本語対応・OptionSet ラベル変換） |
+| [パレート図パターン](references/pareto-chart-pattern.md) | 不良分析・ABC 分析などの分類別集計を降順棒 + 累積構成比折れ線 + 80% 基準線で可視化（重点対策対象の強調色） |
+| [チェックリスト採点パターン](references/checklist-scoring-pattern.md) | 点検・監査系業務の判定トグル・スコア自動計算（対象外を分母から除外）・テンプレート一括生成・親レコードへのスコア同期 |
+| [クロス集計マトリクスパターン](references/cross-tab-pattern.md) | 2 軸の組み合わせ件数をヒート色付きピボット表で俯瞰（行列自動生成・合計行/列・追加依存なし） |
+| [縦タイムライン/ステッパーパターン](references/timeline-stepper-pattern.md) | 順序を持つ項目の進行状態を縦に可視化（done/current/problem/pending・行ごとに操作ボタン差込可・追加依存なし） |
+| [一覧ペイン（マスター詳細）パターン](references/master-detail-pane-pattern.md) | 詳細画面の左にレコード一覧を常駐させて遷移しないで切り替え（Dataverse 側検索・デバウンス・見切れ防止の落とし穴表） |
+| [AI 評価ルールのマスタ化パターン](references/ai-evaluation-master-pattern.md) | LLM の判定基準をテーブルに出してアプリから編集・ジョブ行キューで過去データを再評価・根拠ハイライトと改善提案（OData キーの URL エンコード落とし穴） |
+| [構築リファレンス](references/build-reference.md) | ビルド・デプロイの詳細手順・vite.config.ts 必須設定・TypeScript エラー対処 |
+| [npm CLI リファレンス](references/cli-reference.md) | SDK 1.3.1 / CLI 1.0.1 検証済み・最新版への更新方針・`push -s` の GUID 要件・`share` の最小権限運用・`create-connection` / `refresh-data-source` / `auth-switch` |
+| [ソリューション ALM](references/solution-alm.md) | 接続参照バインド・`almMode` と初回 push・コンポーネント種別・共有時の権限モデル |
+| [データソースパターン](references/data-source-patterns.md) | 生成サービス・dataSourcesInfo・TanStack React Query（旧/native パターン含む）・外部システムの資産を Dataverse にミラーして読む |
+| [モックデータ開発パターン](references/mock-data-pattern.md) | 開発限定の `createMockDataExecutor` 導入・本番バンドル混入防止・SDK 1.2.7 の取得専用制約 |
+| [Lookup 名前解決](references/lookup-resolution.md) | クライアントサイド名前解決・OData FormattedValue パターン・所有者（Owner）列の表示 |
+| [日本語サニタイズ](references/japanese-sanitize.md) | 旧ネイティブ add-data-source 方式の日本語 DisplayName 回避 |
+| [CSP 構成](references/csp.md) | iframe 埋め込み・外部 API・WebSocket 接続・録音の再生時の CSP 設定・CSP 安全な SDK メソッド一覧 |
+| [3D 資産の共通利用](references/3d-asset-sharing.md) | 3D モデル・素材ライブラリを複数アプリ / Blender と共通利用する際の CSP・色合わせ・ライセンス・検証（契約検証とヘッドレス描画） |
+| [Dataverse 検索のドロップダウン](references/dataverse-search.md) | 工事・ユーザーなどの候補検索。関連性検索（`GetRelevantRows`）と部分一致の統合、簡易検索ビューを API で変えない理由、アクセシブルなコンボボックス |
+| [3D 施工進捗モデル](references/three-d-progress-model.md) | 完成形を破線、施工中をクリッピングで立ち上げる進捗表示・部位と工程の対応・BIM/CIM の glTF・GLB の書き出し |
+| [デバイス・メディア](references/device-media.md) | マイク・`AudioContext`・録音・PCM 変換の正常系、SDK にマイクを直接渡さない理由、CPU 負荷、前提欠落時の開始抑止、Console へのログ集約 |
+| [ホスト再現テスト](references/host-emulation-testing.md) | 別オリジン iframe + Code Apps 既定 CSP + 疑似マイクをローカルで再現し、ヘッドレス Edge の Console ログで判定する |
+| [テレメトリ / 可観測性パターン](references/telemetry-pattern.md) | `initializeLogger` / `Metric` 判別共用体・`sessionLoadSummary` SLI・PII サニタイズ規約・Application Insights 連携時の CSP |
+| [ユーザー識別](references/user-identity.md) | ログインユーザーの systemuserid 取得パターン（CSP 安全） |
+| [LIVE 共有パターン](references/live-share-pattern.md) | 1 人が操作し、特定の人に読み取り専用で同じ画面を見せる（Dataverse レコード 1 件の状態 + GrantAccess・1.2 秒配信 / 1.5 秒取得） |
+| [根拠と生成文の行を線で結ぶ](references/source-flow-pattern.md) | React Flow で検索結果（根拠）と生成文の各行を引用の関係で結ぶ（行ごとの接続点・左右配置・ホバー強調・E2E での着地確認） |
+| [ディープリンク](references/deep-link.md) | MDA / Power Automate から特定ページへパラメータ付き遷移 |
+| [フロー連携](references/flow-integration.md) | Power Automate フロー呼び出し・Copilot Studio 応答パース・エラーハンドリング |
+| [Copilot Studio コネクタ](references/copilot-studio-connector.md) | Copilot Studio エージェント直接呼び出し・会話継続・レスポンス解析 |
+| [Copilot Studio v2 iframe](references/copilot-studio-v2-embed.md) | v2 Web app チャネルを Code Apps に表示する標準パターン。URL、CSP、認証・受入境界 |
+| [コネクタリファレンス](references/connector-reference.md) | Code Apps で利用する主要コネクタの追加方法・使用例 |
+| [メール・PDF 送信](references/mail-pdf.md) | HTML→PDF 変換・Power Automate 経由メール添付送信パターン |
+| [地図埋め込みパターン](../standard/references/map-embed-pattern.md) | Google Maps iframe 埋め込み（**Code Apps は `frame-src` 追加が必須**） |
+| [高度な実装パターン](references/advanced-patterns.md) | マルチ環境・オフライン・i18n・パフォーマンス最適化パターン |
+| [プレデプロイレビュー](references/pre-deploy-review.md) | 「デプロイして」「プッシュして」時の自動チェック手順 |
+| [新規テーマ開始チェックリスト](references/new-theme-checklist.md) | 前テーマの残骸がないクリーン開始の確認手順・scaffold 時に含めないファイル |
+| [トラブルシューティング](references/troubleshooting.md) | 頻出エラーと対処法（GUID フィルタ・`.toLowerCase()` 統一・テンプレート削除時の use-theme 巻き添え 等） |
+| [サンプル作成ガイド](references/sample-authoring-guide.md) | 公開リポジトリ向けサンプルのセキュリティ要件・環境変数ルール・feature flag 命名規則 |
+
+### スクリプト
+
+| スクリプト | 用途 |
+|---|---|
+| [check_code_apps_environment.py](scripts/check_code_apps_environment.py) | 明示依頼時・Code Apps 許可関連の障害時だけ使用。委任権限を確認して診断し、通常の init / push 前には実行しない |
+| [configure_code_app_csp.py](scripts/configure_code_app_csp.py) | Code Apps の CSP（`frame-src` 等）を確認・追加・検証。iframe を使うアプリはデプロイ前に `--assert` を通す |
+| [setup_connection_reference.py](scripts/setup_connection_reference.py) | 専用接続の作成・正常性確認→冪等な参照作成→バインド/所属の読み戻し→ `.env` 保存。init 後に実行 |
+| [add_data_source.py](scripts/add_data_source.py) | データソースを**非対話**で追加する。コネクタの通称（`sharepoint` 等）を `shared_xxx` に解決し、接続・必須値を確定してから `--non-interactive` で CLI を起動する。Step 3 の標準 |
+| [pa_cli.py](scripts/pa_cli.py) | 公式ローカル CLI 解決、プロジェクト `.env` 優先、環境・接続の検証、承認付き追加認証。上記2スクリプトで共用 |
+| [pre-deploy-check.mjs](scripts/pre-deploy-check.mjs) | `.env` / `power.config.json` / モック実行基盤の本番混入を検証（`npm run predeploy`）。プロジェクト直下の `scripts/` にコピーして使う |
+| [detect-csp-hazards.mjs](scripts/detect-csp-hazards.mjs) | 既定 CSP で無言で失敗する書き方を検出（predeploy チェック 13 が呼ぶ。`pre-deploy-check.mjs` と同じ場所にコピーする） |
+| [templates/csp-safe-gltf.ts](templates/csp-safe-gltf.ts) | 既定 CSP の中で GLB を読む GLTFLoader（埋め込みテクスチャを `createImageBitmap` でデコード・外部参照は明示エラー・同梱 GLB の base64 デコード） |
+| [validate_3d_assets.py](scripts/validate_3d_assets.py) | 素材ライブラリ manifest・テクスチャ・GLB の契約（サイズ・色の偏り・光沢フラグ・ライセンス・名前空間）を検証 |
+| [capture_3d.mjs](scripts/capture_3d.mjs) | ヘッドレス Edge（DevTools プロトコル、Playwright 不要）で 3D 画面を撮り、描画状態を `window.__viewer` などから取得する。`--ready` で描画完了を待ち、`--fail-on-error` でページのエラーを失敗にする |
+| [inspect_table_metadata.py](scripts/inspect_table_metadata.py) | 既存テーブルの EntitySetName / 主キー / 列 / 参照先 / 選択肢を調査（既存テーブル接続時は実装前に必須） |
+| [validate_cli_reference.py](scripts/validate_cli_reference.py) | テンプレート採用版の `pa app share --help` と CLI リファレンスの主要オプション・実行例が一致することを検証 |
+| [validate_sample.py](scripts/validate_sample.py) | `samples/` 配下の完全性と generic-base のテレメトリ契約を検証（必須ファイル・import 先の実在・秘匿情報・SDK の使い方） |
+| [sync_dataverse_client.py](scripts/sync_dataverse_client.py) | [templates/dataverse-client.ts](templates/dataverse-client.ts) を `samples/` 配下の全コピーへ反映（SDK の破壊的変更への追従はこの 1 ファイルを直して配布） |
+| [scaffold_from_cache.ps1](scripts/scaffold_from_cache.ps1) | キャッシュからのテンプレート scaffold |
+| [toggle_table_lang.py](scripts/toggle_table_lang.py) | 旧方式の `pac code add-data-source` 向けにテーブル表示名を一時的に英語化 |
+| [serve_host_emulation.mjs](scripts/serve_host_emulation.mjs) | Power Apps ホスト（別オリジン iframe + `allow` 属性 + 既定 CSP）をローカルで再現してビルド成果物を配信する |
+| [run_headless_media_test.ps1](scripts/run_headless_media_test.ps1) | ヘッドレス Edge に疑似マイク（WAV）を流し、Console ログを抽出する。終了時に残存プロセスを 0 にする |
+| [capture_host_screens.ps1](scripts/capture_host_screens.ps1) | ヘッドレス Edge の仮想時間でタイマー駆動のデモを早送りし、途中・最後の画面を撮る（統合ブラウザが使えない環境の画面確認） |
+| [capture_host_screens_realtime.mjs](scripts/capture_host_screens_realtime.mjs) | 実時間で待って撮る（DevTools プロトコル）。生成 API のストリームなど、仮想時間で進まない画面用 |
+
+### 環境変数
+
+スクリプトが参照するキーは [references/.env.example](references/.env.example) を参照（実値はリポジトリルートの `.env` に置く）。

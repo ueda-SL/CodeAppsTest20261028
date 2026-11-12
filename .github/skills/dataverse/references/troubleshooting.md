@@ -1,0 +1,986 @@
+# Dataverse OData API トラブルシューティング
+
+Dataverse Web API / OData 操作で頻出する問題と対処法。
+Python スクリプト（`auth_helper.py` 経由）および Code Apps SDK 共通。
+
+---
+
+## 1. ナビゲーションプロパティ名の大文字小文字が不正確で 400 エラー
+
+### 症状
+
+`PATCH` でルックアップ列にレコードを紐付ける際、HTTP 400 エラーが返る:
+```
+An undeclared property 'msdyn_iotalert' which only has property annotations
+in the payload but no property value was found in the payload.
+```
+
+### 原因
+
+`@odata.bind` のナビゲーションプロパティ名の **大文字小文字が正確でない**。
+OData のバインド構文では、スキーマ定義上の正確なプロパティ名が必要。
+
+```json
+// ❌ 小文字のみ — 400 エラー
+{ "msdyn_iotalert@odata.bind": "/msdyn_iotalerts(xxx)" }
+
+// ✅ スキーマ通りの大文字小文字 — 成功
+{ "msdyn_IoTAlert@odata.bind": "/msdyn_iotalerts(xxx)" }
+```
+
+### 正しいプロパティ名の調べ方
+
+EntityDefinitions API で `ManyToOneRelationships` を照会する:
+
+```python
+GET /api/data/v9.2/EntityDefinitions(LogicalName='{entity}')/ManyToOneRelationships
+  ?$filter=ReferencedEntity eq '{target_entity}'
+  &$select=SchemaName,ReferencingEntityNavigationPropertyName,ReferencingAttribute
+```
+
+**`ReferencingEntityNavigationPropertyName`** が `@odata.bind` で使うべき正確な名前。
+
+### よくある例
+
+| エンティティ | ルックアップ先 | ナビゲーションプロパティ名 |
+|---|---|---|
+| incident | msdyn_iotalert | `msdyn_IoTAlert` |
+| msdyn_workorder | msdyn_iotalert | `msdyn_IoTAlert` |
+| msdyn_iotalert | msdyn_customerasset | `msdyn_CustomerAsset` |
+| msdyn_iotalert | incident | `msdyn_Case` |
+
+---
+
+## 2. IoT アラートのリレーション構造（多経路データ取得）
+
+### 背景
+
+IoT アラートは複数のテーブルから参照されるため、1 つのクエリパスだけでは取得漏れが発生する。
+
+### リレーション構造
+
+```
+IoTAlert ──→ CustomerAsset   (_msdyn_customerasset_value)
+IoTAlert ──→ Incident         (_msdyn_case_value)
+Incident ──→ IoTAlert         (_msdyn_iotalert_value)
+WorkOrder ──→ IoTAlert        (_msdyn_iotalert_value)
+```
+
+### 完全な取得パターン（3 ルートマージ）
+
+```typescript
+// パス 1: 資産に直接紐づく IoT アラート
+const directAlerts = await getIoTAlertsByAsset(assetId);
+
+// パス 2: 作業指示書経由の IoT アラート ID
+const woIotIds = workOrders
+  .map(wo => wo._msdyn_iotalert_value)
+  .filter(Boolean);
+
+// パス 3: サポート案件経由の IoT アラート ID
+const incidentIotIds = incidents
+  .map(inc => inc._msdyn_iotalert_value)
+  .filter(Boolean);
+
+// 全 ID をマージして一括取得（重複排除）
+const allIds = [...new Set([...woIotIds, ...incidentIotIds])];
+const linkedAlerts = await getIoTAlertsByIds(allIds);
+
+// マージ（パス 1 + パス 2,3）
+const merged = new Map();
+directAlerts.forEach(a => merged.set(a.msdyn_iotalertid, a));
+linkedAlerts.forEach(a => { if (!merged.has(a.msdyn_iotalertid)) merged.set(a.msdyn_iotalertid, a); });
+```
+
+---
+
+## 3. エンティティリレーションシップの調査パターン
+
+### 特定テーブルのルックアップ列一覧を取得
+
+```python
+# ManyToOne（N:1）リレーションシップを取得
+GET /api/data/v9.2/EntityDefinitions(LogicalName='{entity}')/ManyToOneRelationships
+  ?$select=SchemaName,ReferencedEntity,ReferencingAttribute,
+           ReferencingEntityNavigationPropertyName,
+           ReferencedEntityNavigationPropertyName
+```
+
+### 特定テーブル間のリレーションシップを検索
+
+```python
+# incident → msdyn_iotalert の関係を調べる
+GET /api/data/v9.2/EntityDefinitions(LogicalName='incident')/ManyToOneRelationships
+  ?$filter=ReferencedEntity eq 'msdyn_iotalert'
+  &$select=SchemaName,ReferencingEntityNavigationPropertyName,ReferencingAttribute
+```
+
+### 逆方向（OneToMany）の確認
+
+```python
+GET /api/data/v9.2/EntityDefinitions(LogicalName='{entity}')/OneToManyRelationships
+  ?$filter=ReferencingEntity eq '{child_entity}'
+  &$select=SchemaName,ReferencedEntityNavigationPropertyName
+```
+
+---
+
+## 4. PowerShell + Python 実行時の f-string エスケープ問題
+
+### 症状
+
+PowerShell で `python -c "..."` を実行すると、Python の f-string 内の `{}`
+が PowerShell の ScriptBlock と解釈されてエラーになる:
+
+```
+python.exe: ScriptBlock should only be specified as a value of the Command parameter.
+```
+
+### 対処
+
+複雑な Python コードはインラインではなくスクリプトファイルを作成して実行する:
+
+```bash
+# ❌ インライン実行 — {} がPowerShellに解釈される
+python -c "print(f'value={x}')"
+
+# ✅ スクリプトファイル経由
+python scripts/check_data.py
+```
+
+### 適用範囲
+
+- Dataverse API 調査スクリプト
+- デモデータ投入スクリプト
+- エンティティメタデータ確認スクリプト
+
+---
+
+## 5. 既存テーブルを再利用せず重複作成して二重管理になる
+
+### 症状
+
+顧客・製品・ユーザーなど、すでに標準/既存テーブルがあるのにカスタムテーブルを新規作成し、
+データが 2 カ所に分散してレポート・検索が不整合になる。
+
+### 原因
+
+設計前に環境スキャンをしていない。「顧客 = account/contact」「製品 = product」「ユーザー = systemuser」
+という標準テーブルの存在を見落としている。
+
+### 対処
+
+- 設計前に `scan_environment.py` を実行し、再利用レポートをユーザーと合意する。
+- ユーザー参照は `ownerid`/`createdby`/`modifiedby` システム列＋`systemuser` Lookup。
+- 顧客参照は customer 型 Lookup（account/contact ポリモーフィック）。
+
+---
+
+## 6. 標準テーブルの EntitySetName / NavProp を推測して失敗
+
+### 症状
+
+標準テーブルへの Lookup やクエリで `account` → `accounts` のように推測したが、
+`contact` → `contacts`、`opportunity` → `opportunities` など複数形が不規則で 404/400 になる。
+
+### 対処
+
+EntitySetName と NavProp は必ず API から取得する（推測しない）。
+
+```python
+# EntitySetName
+api_get("EntityDefinitions(LogicalName='opportunity')?$select=EntitySetName")
+# NavProp（customer 型は account/contact で別名）
+api_get("EntityDefinitions(LogicalName='opportunity')/ManyToOneRelationships"
+        "?$filter=ReferencedEntity eq 'account'&$select=ReferencingEntityNavigationPropertyName")
+```
+
+---
+
+## 7. customer 型 Lookup の @odata.bind で account/contact の別名を誤る
+
+### 症状
+
+customer 型（account/contact ポリモーフィック）の Lookup を設定する際、
+`{lookup}@odata.bind` だけで設定しようとして 400 エラーになる。
+
+### 対処
+
+customer 型は**ターゲット型ごとの別名 NavProp** を使う。
+
+```json
+// account を指す
+{ "{prefix}_customerid_account@odata.bind": "/accounts({id})" }
+// contact を指す
+{ "{prefix}_customerid_contact@odata.bind": "/contacts({id})" }
+```
+
+正確な別名は `ManyToOneRelationships` の `ReferencingEntityNavigationPropertyName` で確認する。
+
+---
+
+## 8. `ThreadPoolExecutor` 並行構築中の一時的なネットワーク切断／スロットリングでビルド全体が停止する
+
+### 症状
+
+14 テーブル×多数列を `ThreadPoolExecutor` で並行構築する長時間バッチの途中で、
+`requests.exceptions.ConnectionError`（`RemoteDisconnected`）や `429 Too Many Requests` が
+1 回発生しただけでスクリプト全体が異常終了する。`retry_metadata()` は
+「既に存在（スキップ）」「メタデータロック競合（"another"+"running"）」しかリトライ対象にしておらず、
+一時的なネットワーク断・スロットリングは想定外エラーとして即座に再送出されていた。
+
+### 原因
+
+`retry_metadata()`（`auth_helper.py`）の例外分岐が固定 4 パターンのみで、
+Dataverse API 呼び出し数が多い一括構築では避けられない下記のエラー種別に対応していなかった:
+
+- `requests.exceptions.ConnectionError` / `Timeout`（"Connection aborted", "Remote end closed connection" 等）
+- HTTP `429`（スロットリング）/ `503`（一時的な過負荷）
+
+### 対処（`auth_helper.py` の `retry_metadata()` に恒久対応済み）
+
+`already exists` / ロック競合の既存分岐に加え、以下 2 分岐を追加する。
+
+```python
+# --- 一時的なネットワーク切断 → リトライ ---
+if isinstance(
+    exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)
+) or "remote end closed connection" in detail_lower:
+    wait = 10 * (attempt + 1)
+    time.sleep(wait)
+    continue
+
+# --- スロットリング（429 / 503）→ Retry-After を尊重してリトライ ---
+status_code = exc.response.status_code if isinstance(exc, requests.HTTPError) and exc.response is not None else None
+if status_code in (429, 503) or "429 client error" in detail_lower:
+    retry_after = exc.response.headers.get("Retry-After") if isinstance(exc, requests.HTTPError) and exc.response is not None else None
+    wait = int(retry_after) if retry_after else 15 * (attempt + 1)
+    time.sleep(wait)
+    continue
+```
+
+これにより、長時間の一括メタデータ構築でも一時的な通信エラー／スロットリングで
+スクリプト全体がクラッシュせず、自動的にリトライして完走できる。
+
+---
+
+## 9. Decimal 型列の `maxValue` が Dataverse の上限を超えて `0x80040203`（Min/max out of range）
+
+### 症状
+
+金額系の Decimal 列（例: 1 兆円を上限にしたい `金額(円)` 列）を作成すると
+`400 Bad Request` + `{"error":{"code":"0x80040203","message":"Min/max values are out of range"}}` になる。
+
+### 原因
+
+Dataverse の Decimal 属性がサポートする値の範囲は **-100,000,000,000 〜 100,000,000,000（1000億）** まで。
+`maxValue: 1000000000000`（1 兆）のように 1000 億を超える値を指定すると作成に失敗する。
+
+### 対処
+
+金額系 Decimal 列の `maxValue` は 1000 億（`100000000000`）以内に収める。
+それ以上の桁が必要な場合は「百万円単位」等の縮小した単位で保持する（本プロジェクトの
+`出資簿価(百万円)` 列がこのパターン）。
+
+**恒久対応（★ `setup_dataverse.py` に実装済み）**: `TABLES` 定義から API 呼び出し前に
+`validate_tables()` が Decimal/Integer の値域・String/Memo の `maxLength` を静的検証し、
+上限超過があれば Step 1 の前（=ネットワーク呼び出し前）にエラーで停止する。これにより、
+並行構築の途中で一部のテーブルだけ作成された不完全な状態で失敗する事故を防げる。
+
+---
+
+## 10. 標準テーブル（`systemuser` 等）への Lookup 追加で `SchemaName` がプレフィックス不正エラーになる
+
+### 症状
+
+`systemuser` のような標準テーブルにカスタム Lookup 列を追加する際、
+`RelationshipDefinitions` への POST が `400 Bad Request` +
+`{"error":{"code":"0x80044366","message":"...must start with a valid customization prefix..."}}` になる。
+
+### 原因
+
+Lookup（1:N リレーション）の `SchemaName` を `f"{from_table}_{column_logical}"` のように機械的に組み立てると、
+`from_table` が `systemuser` のような標準テーブルの場合はプレフィックスの付いていない文字列
+（例: `systemuser_geek_organizationid`）になり、Dataverse のカスタマイズプレフィックス検証に失敗する。
+
+### 対処
+
+`SchemaName` を組み立てる際、`from_table` がカスタマイズプレフィックスで始まっていなければ明示的に付与する。
+
+```python
+from_schema = l["from_table"] if l["from_table"].startswith(PREFIX) else f"{PREFIX}_{l['from_table']}"
+body["SchemaName"] = f"{from_schema}_{l['column_logical']}"
+```
+
+---
+
+## 11. stdout をファイルにリダイレクトすると絵文字 `print()` が `UnicodeEncodeError` でクラッシュする（Windows）
+
+### 症状
+
+スクリプトの標準出力を PowerShell の `*>` でログファイルにリダイレクトして実行すると、
+エラーハンドラの `print(f"❌ {msg}")` 等が
+`UnicodeEncodeError: 'cp932' codec can't encode character '\u274c'` で失敗し、
+**本来の原因より先にこの二次エラーで異常終了する**（原因の隠蔽）。
+
+### 原因
+
+Windows で stdout が非 tty（ファイルリダイレクト）になると、Python はコンソールの UTF-8 ではなく
+**システムロケール（cp932 = Shift-JIS）** をデフォルトエンコーディングとして使う。
+絵文字（`❌` 等）は cp932 で表現できない文字のため出力時に例外になる。
+
+### 対処
+
+スクリプト冒頭で stdout/stderr を明示的に UTF-8 に固定する（`errors="replace"` で万一の非対応文字も潰す）。
+
+```python
+try:
+    sys.stdout.reconfigure(line_buffering=True, encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(line_buffering=True, encoding="utf-8", errors="replace")
+except AttributeError:
+    pass
+```
+
+ログファイルを `Get-Content` で確認する際も、既定のロケールではなく `-Encoding UTF8` を付ける
+（`Get-Content log.txt -Encoding UTF8`）と文字化けを避けられる。
+
+---
+
+## 12. エラーメッセージにレスポンスボディを含めないと 400 系エラーの原因究明ができない
+
+### 症状
+
+`str(exc)` だけを使ったエラーメッセージは `400 Client Error: Bad Request for url: ...` としか表示されず、
+実際の失敗理由（属性名重複・値域超過・プレフィックス不正等）が分からない。
+特に `ThreadPoolExecutor` での並行実行時や、`retry_metadata` を呼び出す側がループを
+`try/except` で囲わずに丸ごと失敗させている箇所（Lookup 作成ループ等）では、
+最初の 1 件のエラーで残り全件の処理が止まり、かつ原因も分からないまま終了する。
+
+### 対処
+
+- 例外を捕捉する箇所では `requests.HTTPError` の `exc.response.text`（レスポンスボディ）を
+  必ずログに含める。
+- ループ処理は 1 件ずつ `try/except` で捕捉してエラーを蓄積し、**最後まで処理を続行**してから
+  まとめて `RuntimeError` を送出する（`create_tables()` の並行実行と同じパターンを、
+  逐次処理の `create_lookups()` にも適用する）。
+
+```python
+except Exception as exc:
+    detail_text = ""
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        try:
+            detail_text = f"\n  詳細: {resp.text}"
+        except Exception:
+            pass
+    msg = f"... の作成でエラー: {exc}{detail_text}"
+    print(f"  ❌ {msg}")
+    errors.append(msg)
+```
+
+このパターンにより、1 回のスクリプト実行で「どのテーブル／列／Lookup が失敗したか」と
+「なぜ失敗したか」が同時に分かり、修正→再実行（べき等）のサイクルを最短で回せる。
+
+---
+
+## 13. Windows PowerShell でログをファイルにリダイレクト/`Tee-Object`すると日本語が文字化けする（`chcp 65001` だけでは直らない）
+
+### 症状
+
+`python -u setup_dataverse.py *> setup_dataverse.log` や
+`python -u setup_dataverse.py 2>&1 | Tee-Object -FilePath log.txt` のように出力を
+リダイレクト/`Tee-Object`すると、ログ中の日本語（テーブル名の日本語表示名や進捗メッセージ、
+`auth_helper` のログ等）が `繝・・繝悶Ν` のような文字化けになる。スクリプト側は
+`sys.stdout.reconfigure(encoding="utf-8", ...)` で UTF-8 出力しているにもかかわらず発生し、
+実行前に `chcp 65001` を実行していても直らないことがある（`Get-Content -Encoding UTF8` で
+読み直しても直らない）。
+
+### 原因
+
+`chcp 65001` は Windows の**コンソールの既定コードページ**を切り替えるだけで、
+PowerShell（特に pwsh 7.x を含む）が子プロセスの出力を解釈する際に使う
+**`[Console]::OutputEncoding`（.NET プロパティ）には自動反映されない**。
+そのため `chcp 65001` 実行後でも `[Console]::OutputEncoding` が cp932（Shift-JIS）の
+ままになっていることがあり、この場合 Python が UTF-8 で出力したバイト列を PowerShell が
+cp932 として誤ってデコードして文字化けする。実際に確認された値の例:
+```powershell
+> [Console]::OutputEncoding
+EncodingName : Japanese (Shift-JIS)   # chcp 65001 実行後でもこのままのことがある
+```
+
+### 対処
+
+`chcp 65001` に加えて、**`[Console]::OutputEncoding` を明示的に UTF-8 へ設定**してから
+Python を実行する。これが恒久対策で、`chcp` 単体より確実に直る。
+
+```powershell
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001
+python -u setup_dataverse.py 2>&1 | Tee-Object -FilePath setup_dataverse.log
+```
+
+なお、この文字化けは表示上の問題であり、Dataverse API 呼び出しやテーブル／列の作成結果
+そのものには影響しない（あくまでログの可読性の問題）。
+
+---
+
+## 14. ロック競合でリトライ上限に達しても `retry_metadata()` が例外を投げず、列/Lookup が未作成のまま後続処理が「成功扱い」で進んでしまう
+
+### 症状
+
+ログに `xxx: max retries (5) exceeded` と出力されるものの、呼び出し元の `try/except` で
+検知されず、`errors` リストにも追加されないまま Step 4（`PublishAllXml`）まで進んでしまう。
+実際にはその列/Lookup は作成されていないのに、スクリプトはエラーなく完走したように見える。
+
+### 原因
+
+`retry_metadata()` は「`already exists`（既に存在するので意図的にスキップ）」と
+「ロック競合/ネットワークエラー/スロットリングでリトライ上限に達した（本来はエラー）」の
+どちらの場合も同じ `return None` を実行していた。呼び出し元は戻り値を見ておらず、
+例外が飛んでこない限り「成功した」とみなすため、後者のケースが握りつぶされていた。
+
+複数プロセスの同時実行（本項目の直前に発見した「別プロセスが同じ環境に対して並行実行
+されていた」ケース等）でロック競合が慢性化すると、この握りつぶしが頻発しやすい。
+
+### 対処
+
+`retry_metadata()` のリトライ上限到達時は、`already exists` スキップとは明確に区別し、
+`RuntimeError` を送出する（`None` を返さない）。呼び出し元は既存の `try/except` で
+このエラーを捕捉し、`errors` リストに蓄積 → ループ完走後にまとめて `RuntimeError` を送出する
+（項目 6・12 のパターンと合流する）。
+
+```python
+# retry_metadata() の末尾
+msg = f"{description}: max retries ({max_attempts}) exceeded"
+print(f"  {msg}")
+raise RuntimeError(msg)  # None を返して黙って成功扱いにしない
+```
+
+この修正により、ロック競合等でリトライを使い切った列/Lookupは確実にエラーとして検出され、
+再実行（べき等）で確実に補完対象になる。
+
+---
+
+## 15. `pandas` の数値列を `api_post` に渡すと `TypeError: Object of type int64 is not JSON serializable` で 400 系エラーになる
+
+### 症状
+
+デモデータ投入ループ（`pd.read_excel()` → `iterrows()` → `api_post()`）で、ある行から
+突然 `400 Bad Request` や `TypeError: Object of type int64 is not JSON serializable` が
+発生する。同じパターンの他のループ（例: 直前まで問題なく完走していた別テーブルの投入）では
+発生しないことがあり、原因がわかりにくい。
+
+### 原因
+
+`pandas` の数値列（int/float）を `row.get("Xxx")` で取り出すと、値は Python 標準の
+`int`/`float` ではなく `numpy.int64`/`numpy.float64` になる。`requests` の `session.post(url, json=body)`
+は内部で標準の `json` モジュールを使ってシリアライズするため、`numpy.int64`/`numpy.float64` が
+`body` 内に残っていると `TypeError: Object of type int64 is not JSON serializable` で失敗する。
+
+このエラーは `numpy`/`pandas` のバージョンや `iterrows()` の内部実装（行を Series 化する際の
+dtype 昇格）によって発生タイミングが変わることがあり、「同じコードパターンの別ループでは
+たまたま発生しない」ように見えることがある — が、`numpy` スカラー型が `body` に混入している
+限り、いつ発生してもおかしくない潜在バグである。
+
+### 対処
+
+数値/日付のクレンジングを行う共通ヘルパー（`_clean()` 等）で、`numpy` スカラー型を
+`.item()` でネイティブ Python 型に変換してから返す。
+
+```python
+def _clean(v):
+    import numpy as np
+    import pandas as pd
+    if v is None:
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if hasattr(v, "strftime"):
+        return v.strftime("%Y-%m-%d")
+    if isinstance(v, np.generic):
+        return v.item()  # numpy.int64/float64/bool_ → int/float/bool
+    return v
+```
+
+Excel/CSV から読み込んだ値を Dataverse Web API に渡す全てのループで、必ずこのような
+クレンジング関数を経由させること（数値列を `row["Xxx"]` で直接 `body` に入れない）。
+
+### 恒久対策（スクリプトに実装済み）
+
+`_clean()` での変換に加え、`_post_debug()`（Step 6 の全エンティティ投入がこれを経由）内で
+`_assert_json_safe(body, label)` を呼び、投入直前に `numpy.generic` 型が `body` に残っていないかを
+**毎回**検証する。将来 `_clean()` を経由しない新しいフィールドが追加された場合でも、
+成功する実行（正常系）を含めて必ずこのチェックが働き、明確なエラーで検出できる。
+
+---
+
+## 16. `Decimal` 型の上限（1000億）を超える金額を `Money` 型に変更したら、今度は `Money` のデフォルト上限（10億）で 400 エラーになる
+
+### 症状
+
+`Decimal` 型の列が `0x80044330`（値域外）エラーになったため `Money`（Currency）型に変更したところ、
+今度は次のようなエラーになる:
+```
+A validation error occurred for geek_shipment.geek_amountjpy. The value 26036836560 of type
+Microsoft.Xrm.Sdk.Money is outside the valid range(0 to 1000000000).
+```
+
+### 原因
+
+Dataverse の `MoneyAttributeMetadata` は `MinValue`/`MaxValue` を明示しないと
+**デフォルトで 0～10億（1,000,000,000）** に制限される。`Decimal`（デフォルト上限1000億）より
+むしろ狭いデフォルト値のため、単純に型だけ `Money` に変えても解決しない。
+
+### 対処
+
+列作成 JSON ボディに `MinValue`/`MaxValue` を明示的に指定する（`Money` の実際のプラットフォーム
+上限は約 ±922,337,203,685,477 と `Decimal` よりはるかに広い）。
+
+```python
+elif col["type"] == "Money":
+    base["@odata.type"] = "#Microsoft.Dynamics.CRM.MoneyAttributeMetadata"
+    base["Precision"] = col.get("precision", 2)
+    base["MinValue"] = col.get("minValue", 0)
+    base["MaxValue"] = col.get("maxValue", 1_000_000_000_000)  # 明示しないと10億に制限される
+```
+
+型を `Decimal` → `Money` に変更する場合、既存の列は削除して作り直す必要がある
+（メタデータ更新で型変更は不可）。列削除時は当該列を含む既存レコードの値が失われるため、
+影響を受けるレコードも合わせて削除するか、削除前に値を退避しておくこと。
+
+### 恒久対策（スクリプトに実装済み）
+
+`build_column_body()` の `Money` 分岐は `MinValue`/`MaxValue` を必ず明示するようにし、
+`DATAVERSE_LIMITS["Money"]` を追加して `validate_tables()`（Step 0・API 呼び出し前の静的検証）でも
+Money 列の上限を毎回チェックする。さらに `validate_demo_data_ranges()`（Step 6 開始直前）で
+Excel 実データの min/max を `TABLES` 定義の Decimal/Money 上限と突き合わせ、実データが
+スキーマ上限を超えていれば投入ループに入る前に明確なエラーで停止する（正常系でも毎回実行）。
+
+---
+
+## 17. デモデータ投入ループ（Step 6 等）に既存チェックを入れず「べき等でない」まま運用すると、途中失敗からの再実行で重複行が生まれる
+
+### 症状
+
+大量行を `api_post()` で連続投入するループ（テーブル/Lookup 作成とは別に、デモデータ本体を
+投入するループ）が途中の行でエラー停止した後、原因を直して再実行すると、既に投入済みだった
+先頭側の行が再度 `api_post()` され、Dataverse 上に重複レコードが作られてしまう。
+
+### 原因
+
+テーブル/Lookup 作成側（Step 2/3）は「既存なら DisplayName 等で存在チェックしてスキップ」する
+べき等設計になっていたが、行データ投入側（Step 6）は「毎回 for ループで無条件に `api_post()`」
+という設計のままだった。途中で失敗して再実行する運用が前提の Excel 一括投入スクリプトでは、
+データ本体のループも必ずべき等化しておく必要がある。
+
+### 対処
+
+投入対象のコード列（自然キー、例: `geek_code`）で **投入前に一括で既存 code→id を取得**し、
+ループ内で「既に存在すればその id を使い回してスキップ、無ければ新規作成」するパターンに変更する。
+
+```python
+def _prefetch_codes(entity_set: str, id_attr: str, code_attr: str = f"{PREFIX}_code") -> dict:
+    """既存レコードの code→id マッピングを一括取得する。"""
+    resp = api_get(f"{entity_set}?$select={id_attr},{code_attr}&$top=5000")
+    return {rec[code_attr]: rec[id_attr] for rec in resp.get("value", []) if rec.get(code_attr)}
+
+existing = _prefetch_codes(entity_set, f"{PREFIX}_xxxid")
+for _, row in df.iterrows():
+    code = row["XxxID"]
+    if code in existing:
+        ids[code] = existing[code]
+        continue
+    ids[code] = api_post(entity_set, body)
+```
+
+この対処により、Excel 一括投入スクリプト全体（テーブル/Lookup 作成 ～ デモデータ本体）が
+一貫して「何度失敗して再実行しても安全」なべき等スクリプトになる。
+
+### 恒久対策（スクリプトに実装済み）
+
+Step 6 の全 15 エンティティ投入ループ（division/organization/group/counterparty/commodity/
+site/route/altroute/systemuser/contract/shipment/investment/creditline/event/eventimpact）が
+`_prefetch_codes()` による既存チェックを経由する構成になっており、正常系（何も失敗していない
+実行）で再実行しても常に「既存ならスキップ」を毎回評価する。API 呼び出しは全て `_post_debug()`
+経由に統一し、`_assert_json_safe()` によるチェックも合わせて毎回働く。
+
+---
+
+## 18. `ThreadPoolExecutor`（並行数2）でもテーブル数が多い（10件前後）と、複数テーブルが同時にリトライ上限（5回）へ到達し、1回の実行では完走しない
+
+### 症状
+
+多数の既存カスタムテーブル（他ソリューションと共用の混雑した環境）で 10 個前後のテーブルを
+並行数 2 で作成すると、複数のテーブル・列が同時にメタデータロック競合の `retry_metadata` 上限
+（5回・最大 50秒待機）へ到達し、`Errors occurred during parallel table creation` で
+スクリプトが異常終了する（実測: 10テーブル中 4テーブル/列が失敗）。項目 14 の修正により
+エラー自体は正しく検出されるようになったが、**エージェント/ユーザーが手動でスクリプトを
+再実行しないと完走しない**状態のままだった（スクリプトは冪等なので再実行自体は安全だが、
+「自動で完走する」体験ではなかった）。
+
+### 原因
+
+`create_tables()` は並行実行（`ThreadPoolExecutor(max_workers=2)`）の結果、失敗した
+テーブルをまとめて `RuntimeError` として送出するだけで、失敗分だけを対象にした
+自動リトライは行っていなかった。混雑環境では並行実行そのものがロック競合の原因になるため、
+同じ並行度で再試行しても解消しない一方、**直列（並行数1）で少し待ってから再試行すれば
+高確率で成功する**（実際、手動でスクリプトを再実行した際は 2 回目で全テーブルが完成した）。
+
+### 対処（恒久対策・`create_tables()` に実装済み）
+
+並行実行パスの後に、失敗したテーブルだけを対象とした**直列の自動リトライパス**を追加した。
+これにより、混雑環境でも 1 回のスクリプト実行内で自己修復し、ユーザーの手動再実行が
+不要になる（それでも失敗した場合のみ最終的に `RuntimeError` を送出する）。
+
+```python
+# create_tables() 内: 並行実行後に失敗分だけ直列リトライ
+if failed:
+    print(f"⚠ {len(failed)} table(s) failed during parallel creation (lock contention). Retrying sequentially...")
+    for tbl in TABLES:
+        if tbl["logical"] not in failed:
+            continue
+        time.sleep(15)  # メタデータロックの解放を待つ
+        _create_single_table(tbl)  # 失敗すれば still_failed に集約し、最後に RuntimeError
+```
+
+この恒久対策により、10 テーブル規模・混雑環境でも通常は 1 回の実行で完走するようになった。
+
+---
+
+## 19. 同じプレフィックスを共有する環境で、既存テーブルと論理名が衝突し他プロジェクトのテーブルを拡張してしまう
+
+### 症状
+
+発行元プレフィックスを既存プロジェクトと共用する環境で `{prefix}_project` /
+`{prefix}_incident` / `{prefix}_knowledge` のような一般的な論理名を `TABLES` に定義すると、
+テーブル作成 API が「既存テーブルあり」として素通りし、**別プロジェクトのテーブルに
+自分の列が追加される**。エラーにならないため気付きにくく、他プロジェクトのスキーマを
+汚染したうえで、デモデータ投入時に想定外の既存行が混ざる。
+
+### 原因
+
+`_create_single_table()` は既存テーブルを検出したら列追加へ進む設計（べき等性のため）で、
+「その既存テーブルが**自ソリューションのものか**」を確認していなかった。
+
+### 対処（恒久対策・`validate_no_foreign_tables()` に実装済み）
+
+Step 1 の前に、`TABLES` の論理名が対象ソリューション**外**の既存テーブルと衝突していないかを
+検証する事前チェックを追加した。`EntityDefinitions`（プレフィックス一致）と
+`solutioncomponents`（`componenttype eq 1`）を突き合わせ、ソリューション未所属の
+既存テーブルを検出したら API 呼び出し前に中断する。再実行時は自ソリューションのテーブルなので
+素通りし、べき等性は保たれる。
+
+衝突が出た場合は、論理名を専用の名前空間に変更して回避する（例: `geek_` プレフィックスを
+共用しつつ `geek_kbproject` のように 2〜3 文字の識別子を挟む）。
+
+---
+
+## 20. `setup_dataverse.py` をプロジェクトの `scripts/` にコピーすると `ModuleNotFoundError: auth_helper`
+
+### 症状
+
+テンプレート `.github/skills/dataverse/scripts/setup_dataverse.py` をプロジェクトの
+`scripts/` にコピーして実行すると、`from auth_helper import ...` が
+`ModuleNotFoundError` になる。
+
+### 原因
+
+テンプレートが `sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "standard", "scripts"))`
+とスキル配下の相対パスを直書きしていたため、コピー先では解決できなかった。
+
+### 対処（恒久対策・`_resolve_auth_helper_dir()` に実装済み）
+
+配置場所に依存しないよう、スキル配下 → スクリプト同階層 → 祖先ディレクトリの
+`.github/skills/standard/scripts` → 祖先ディレクトリ直下、の順で `auth_helper.py` を探索し、
+見つからない場合は配置方法を示す明示的なエラーを送出する。
+
+---
+
+## 21. 同一プレフィックスの発行元が複数あり、意図しない発行元でソリューションが作られる
+
+### 症状
+
+`publishers?$filter=customizationprefix eq '{prefix}'` が複数件返る環境で、先頭要素を
+暗黙採用していたため、意図しない発行元にソリューションが紐づく。
+
+### 対処（恒久対策・`resolve_publisher_id()` に実装済み）
+
+候補が 2 件以上の場合は `uniquename` / `friendlyname` / `publisherid` を列挙して中断し、
+`.env` の `PUBLISHER_UNIQUE_NAME`（または `PUBLISHER_ID`）で明示させる。
+テンプレートに特定環境の `uniquename` をハードコードしていた箇所も併せて削除した。
+
+---
+
+## 22. KPI の日数計算に `createdon` を使い、全 KPI が「データなし」または 0 日になる
+
+### 症状
+
+ダッシュボードの日数系 KPI（平均クローズ日数・承認リードタイム・初回応答日数）が
+すべて `—`／`データなし`／`対象 0 件`、あるいは `0.0日` になる。
+Dataverse を直接照会すると、終了側の日時列（`{prefix}_closedon` 等）には値が入っている。
+
+### 原因
+
+起点に Dataverse の**監査列 `createdon` を使っていた**。
+`createdon` は「レコードを Dataverse に書き込んだ日時」であり、業務上の発生日時ではない。
+
+```text
+createdon  = 2026-09-04T10:34:38Z   ← デモデータ投入日（＝スクリプト実行日）
+closedon   = 2025-03-12T08:30:00Z   ← 業務上のクローズ日時
+diffDays() = -541 日                ← 負の値になり、KPI 側のフィルタで全件除外される
+```
+
+同じ理由で、デモデータや移行データは全レコードの `createdon` がほぼ同一時刻になるため、
+
+- 「起票 → 初回回答」の日数差が **0 日**に潰れる
+- 月次トレンドが**投入した月だけ**に固まり、時系列として意味を持たない
+- 「未承認ナレッジの滞留日数」が常に 0 日になり、滞留を検知できない
+
+### 対処（恒久対策）
+
+**日数計算の起点・終点になる日時は、監査列とは別に業務日時列として明示的に持つ。**
+
+| 監査列（使わない） | 業務日時列（KPI はこちらを使う） |
+|---|---|
+| `createdon` | `{prefix}_reportedon`（起票日時） |
+| `createdon` | `{prefix}_answeredon`（回答日時） |
+| `createdon` | `{prefix}_generatedon`（生成日時） |
+
+テーブル定義（`setup_dataverse.py` の `TABLES`）:
+
+```python
+# 起票日時は Dataverse の createdon（レコード作成日時）とは別に持つ。
+# createdon は移行・再投入で変わるため、KPI の起点に使えない。
+{"logical": f"{PREFIX}_reportedon", "type": "DateTime", "display": "起票日時"},
+```
+
+読み取り側（Code Apps）は業務日時列を優先し、未設定のときだけ `createdon` に退避する:
+
+```ts
+/**
+ * KPI の起点となる「業務上の日時」を取り出す。
+ * createdon はレコードを Dataverse に書いた日時であり業務上の発生日時ではないため、
+ * 業務日時列を優先し、未設定の場合だけフォールバックする。
+ */
+function businessDate(row: DataverseRow, businessField: string): string {
+  return str(row, businessField) ?? str(row, "createdon") ?? ""
+}
+```
+
+デモデータ投入時は、業務日時列に**過去日**を入れて時系列に散らす。
+5W1H の「いつ」のような自由記述 String 列がある場合は、解釈できたときだけ変換して流用する:
+
+```python
+def _to_iso(value: str | None) -> str | None:
+    """"YYYY-MM-DD HH:MM" 形式の自由記述を DateTime 列用の ISO 8601(UTC) に変換する。"""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m-%d %H:%M").strftime("%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+```
+
+### 既存環境の移行
+
+`setup_dataverse.py` のデモデータ投入は既存行をスキップする（べき等）ため、
+定義を直しただけでは既存レコードに値が入らない。列追加と backfill を行う
+**移行専用スクリプトを別に用意して 1 回だけ実行する**。
+
+### レビュー観点
+
+日数・リードタイム系の KPI を実装したら、必ず次を確認する。
+
+- 起点の日時列は業務日時列か（`createdon` になっていないか）
+- 「対象 0 件」「0.0日」は正常値ではなく、**起点日時の設計ミスのシグナル**として疑う
+- 月次トレンドのラベルが実行月の周辺だけに固まっていないか
+
+---
+
+## 23. `EntityDefinitions` を PATCH すると `405 Method Not Allowed`（テーブル監査の有効化等）
+
+### 症状
+
+テーブルの監査（`IsAuditEnabled`）や表示名などのテーブル メタデータを更新しようとして
+PATCH すると、レコードの更新と同じ書き方なのに 405 で失敗する。
+
+```text
+requests.exceptions.HTTPError: 405 Client Error: Method Not Allowed for url:
+  .../api/data/v9.2/EntityDefinitions(510c7696-....)
+```
+
+### 原因
+
+`EntityDefinitions`（メタデータ エンティティ）は **PATCH をサポートしていない**。
+レコード（`geek_xxx` 等のビジネスデータ）は PATCH で部分更新できるが、
+メタデータの更新は **PUT + `MSCRM.MergeLabels: true`** を使う。
+
+### 対処
+
+対象の定義を GET してから変更点を上書きし、PUT で書き戻す。
+`@odata.context` は送り返すとエラーになるため削除する。
+
+```python
+def enable_table_audit(metadata_id: str) -> None:
+    definition = api_get(f"EntityDefinitions({metadata_id})")
+    definition.pop("@odata.context", None)
+    definition["IsAuditEnabled"] = {
+        "Value": True,
+        "CanBeChanged": True,
+        "ManagedPropertyLogicalName": "canmodifyauditsettings",
+    }
+    # auth_helper.api_request は MSCRM.MergeLabels を付けて任意メソッドを送る
+    api_request(f"EntityDefinitions({metadata_id})", definition, method="PUT")
+```
+
+> **部分 PUT は避ける**。変更したいプロパティだけを PUT すると、
+> 送らなかったプロパティが既定値へ戻ることがある。必ず GET したフル定義を編集して送る。
+
+> **反映には公開が必要**: テーブル数分の PUT を終えたら `PublishAllXml` を 1 回呼ぶ。
+> 19 テーブル程度でも数分かかるため、タイムアウトを短く設定した実行環境では
+> バックグラウンド実行かログへのリダイレクトを併用する。
+
+### 関連: 組織レベルの監査は PATCH でよい
+
+組織設定は通常のレコードなので PATCH で更新できる。
+
+```python
+org = api_get("organizations?$select=organizationid,isauditenabled,isuseraccessauditenabled")["value"][0]
+api_patch(f"organizations({org['organizationid']})",
+          {"isauditenabled": True, "isuseraccessauditenabled": True})
+```
+
+`isauditenabled`（組織）→ 各テーブルの `IsAuditEnabled` の **両方**を有効にしないと監査ログは記録されない。
+レコードの参照（Retrieve）監査はストレージと性能への影響が大きいため、要件が明確な場合だけ有効化する。
+
+
+
+
+
+## 24. `setup_dataverse.py` が最初の検証で `501 Not Implemented` になる（`EntityDefinitions` の `startswith`）
+
+### 症状
+
+テーブル作成前の「既存テーブルとの衝突チェック」で `EntityDefinitions?$filter=startswith(LogicalName,'<prefix>_')` が 501 を返し、何も作られずに止まる。
+
+### 原因
+
+メタデータ API（`EntityDefinitions`）は `startswith` / `contains` などの関数フィルターに対応していない。
+
+### 対処
+
+対象テーブルの論理名ごとに `EntityDefinitions(LogicalName='<name>')` を引き、404 を「存在しない＝衝突なし」として扱う。
+**恒久対策済み** — `scripts/setup_dataverse.py` の `validate_no_foreign_tables()`。
+
+## 25. 列を追加して再実行しても、既存のデモレコードの新しい列が空のまま
+
+### 症状
+
+承認状態や写真 URL の列を追加し、デモデータ投入を再実行した。画面の確認待ち一覧は 0 件のままで、Dataverse でも新しい列が空になっている。
+
+### 原因
+
+投入処理が「同じ名前のレコードがあればスキップ」になっている。新しく作るレコードには値が入るが、前回作ったレコードには何も書かれない。
+
+### 対処
+
+デモデータの投入は「あれば PATCH、無ければ POST」（upsert）にする。日付を実行日基準にしている場合、再実行で当日基準に更新される利点もある。
+投入後に、追加した列が埋まっている件数を読み戻して確かめる（例: 確認待ち 0 件なら失敗とみなす）。
+実装例: `code-apps/templates/construction-cockpit/scripts/seed_construction_demo.py` の `upsert()`。
+
+## 26. 別の親に同じ名前の子レコードがあると、1 件にまとまってしまう（名前で既存判定）
+
+### 症状
+
+工事ごとに「準備工」「仮設撤去」などの同じ名前の作業を作ると、2 件目以降が 1 件目を上書きし、先に作った工事の作業が消えたように見える。
+
+### 原因
+
+既存判定のキーを主列（名前）だけにしていた。子テーブルの名前は親ごとに重複するのが普通。
+
+### 対処
+
+子テーブルの既存判定は「親の ID ＋ 名前」で行う（`_<prefix>_project_value|<name>` のような合成キーで索引を作る）。
+自己参照の Lookup（例: 作業の先行作業 `<prefix>_predecessor` → 作業）は、全レコードを作った後に 2 巡目で PATCH して結ぶ。作成順に依存しない。
+自己参照の 1:N リレーションも、通常の Lookup と同じく `RelationshipDefinitions` への POST（参照元と参照先が同じテーブル）で作成できる。
+実装例: 同スクリプトの `record_key()` と、工程を作った後の先行作業の結線。
+
+## 27. 画像列に保存した画像が、フルサイズで取得できない（`$value?size=full` が 204）
+
+### 症状
+
+画像列（`ImageAttributeMetadata`）に 1280×720 の JPEG を PATCH すると 204 で成功するが、`GET …/<列>/$value?size=full` は
+**204（本文なし、`Content-Type: text/html`）**。`size` を付けない取得は 953 バイトのサムネイル（144px）だけが返る。
+
+### 原因
+
+列の作成時に `CanStoreFullImage: true` を送っても**無視され、`false` で作られる**。そのテーブルで最初の画像列は
+`IsPrimaryImage: false` を送っても `true` になる。フルサイズを保存しない列には、サムネイルしか残らない。
+
+### 対処（実測 2026-10-05）
+
+作成後に属性を読み、`CanStoreFullImage` が `false` なら PUT で `true` にして読み戻す。
+
+```python
+path = f"EntityDefinitions(LogicalName='{table}')/Attributes(LogicalName='{column}')"
+meta = api_get(f"{path}/Microsoft.Dynamics.CRM.ImageAttributeMetadata")
+if not meta.get("CanStoreFullImage"):
+    meta.pop("@odata.context", None)
+    meta.update({"@odata.type": "Microsoft.Dynamics.CRM.ImageAttributeMetadata", "CanStoreFullImage": True})
+    api_request(path, meta, method="PUT")
+```
+
+変更後に保存した画像から、`$value?size=full` で全体（15,029 バイト）を取得できた。変更前に保存した画像は保存し直す。
+実装例: code-apps の construction-cockpit テンプレート `scripts/setup_construction_dataverse.py` の `ensure_full_images()`。
+
+## 28. ファイル列を Range で分割取得すると、最後の要求だけ 416 になる
+
+### 症状
+
+`GET …/<ファイル列>/$value` を `Range: bytes=<start>-<start + 4 MB - 1>` で繰り返すと、ファイル末尾を超える最後の要求が
+`416 Requested Range Not Satisfiable` になる。一般的な HTTP サーバーのように末尾で切り詰めない。
+
+### 対処
+
+保存時にファイルサイズを記録し、取得側は `min(start + 4 MB, size) - 1` で末尾を止める。1 回の Range は 4 MB 以内にする。
+画像列の `$value?size=full` は大きすぎる Range でも 206 で全体を返すため、この問題は起きない。
+実装例: construction-cockpit テンプレートの `scripts/upload_cad_model.py`（読み戻し）と `src/lib/binary.ts` の `downloadInChunks`。
+
+## 29. 簡易検索ビュー（Quick Find）の fetchxml を Web API で更新すると 400（0x80040216）
+
+### 症状
+
+`PATCH savedqueries(<id>)` で `fetchxml` を送ると、内容を変えずに送っても `400 {"code":"0x80040216","message":"An unexpected error occurred."}` になる
+（2026-10-06、カスタム テーブル 2 つで再現。`description` だけの PATCH は 204 で成功し、`layoutxml` の同送・`MSCRM.SolutionUniqueName` でも変わらない）。
+
+### 対処
+
+Dataverse 検索の検索列を増やすためのビュー更新を API で行わない。カスタム テーブルの既定の検索対象は主列（名前）だけなので、
+アプリ側で関連性検索（名前）と OData の `contains`（番号・住所など）を併用し、関連性検索の順位を優先して重複を除く。
+テーブルを検索インデックスに入れること自体は `EntityDefinitions` の `SyncToExternalSearchIndex: true` を PUT すれば API でできる。
+**恒久対策済み**: 同梱の [scripts/setup_dataverse_search.py](../scripts/setup_dataverse_search.py) は検索インデックスへの登録だけを行い、ビューを変更しない（`test_setup_dataverse_search.py` が `savedqueries(` の呼び出しが無いことを検査）。
+アプリ側の実装例: code-apps の [Dataverse 検索のドロップダウン](../../code-apps/references/dataverse-search.md) と construction-cockpit テンプレートの `src/lib/record-search.ts`。
+
+## 30. 画像列を作成直後に CanStoreFullImage を有効化すると、読み戻しが false のまま
+
+### 症状
+
+#27 の手順で `CanStoreFullImage: true` を PUT した直後に読み戻すと `false` が返り、確認で止まる。数十秒後に読み直すと `true` になっている。
+
+### 対処（恒久対策済み）
+
+読み戻しを 10 秒間隔で最大 2 分待つ（construction-cockpit テンプレートの `ensure_full_images()`）。
+なお、画像列は JSON の本文に base64 文字列を入れて作成・更新でき（`"<列>": "<base64>"`）、フルサイズで保存される
+（送った JPEG と `$value?size=full` の取得結果がバイト単位で一致することを確認）。AI エージェントの Dataverse ツールから写真を登録する経路に使える。
+
+## 31. 日付だけの列で、Dataverse MCP（read_query）の日付比較が 0 件・時刻付きで返る
+
+- 症状: `Format=DateOnly` の列なのに、`read_query` で `WHERE <prefix>_date = '2026-10-30'` が 0 件、値は `2026-10-30T09:00:00` で返る。期間の集計から最終日が抜ける。
+- 原因: 列の `DateTimeBehavior` が既定の `UserLocal` のまま。UTC 0:00 で保存され、比較・表示がタイムゾーン分ずれる。
+- 対処: 日付だけの列は `DateTimeBehavior=DateOnly` で作る。既存列は `CanChangeDateTimeBehavior` が true なら、属性を GET して
+  `DateTimeBehavior` を書き換えて PUT（`MSCRM.MergeLabels`）→ 公開。
+- 恒久対策済み: `setup_dataverse.py` の `build_column_body()` が `format: DateOnly` の列に `DateTimeBehavior=DateOnly` を付ける。
+  テスト: `test_setup_dataverse_dateonly.py`。Cowork 側の症状は cowork スキルの troubleshooting #51。

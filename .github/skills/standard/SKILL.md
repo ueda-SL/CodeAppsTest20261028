@@ -1,0 +1,250 @@
+---
+name: standard
+description: "Power Platform 共通開発基盤。クイックスタートは標準更新・共通認証後に要望確認で一旦停止し、回答後は自律調査で仕様・architecture・テンプレート選定から開発環境へのフル構成デプロイ・実動作検証まで進む。通常開発は Dataverse を既定とし、環境診断は明示依頼時・障害時だけ。共通認証（auth_helper.py）・ソリューション運用と横断ユーティリティを提供する。"
+category: architecture
+triggers:
+  - "Power Platform 開発"
+  - "クイックスタート"
+  - "quickstart"
+  - "Code Apps"
+  - "Power Automate"
+  - "フロー作成"
+  - "Copilot Studio"
+  - "エージェント開発"
+  - "ソリューション"
+  - "デプロイ"
+  - "トラブルシューティング"
+  - "生成オーケストレーション"
+  - "アイコン作成"
+  - "アイコン生成"
+  - "icon"
+  - "PNG"
+  - "SVG"
+  - "Pillow"
+  - "iconbase64"
+  - "WebResource"
+  - "テーブルアイコン"
+  - "エージェントアイコン"
+  - "アプリアイコン"
+  - "HTML メール"
+  - "メールテンプレート"
+  - "HTMLメールデザイン"
+  - "リッチメール"
+  - "メール通知"
+  - "ニュースレター"
+  - "レポートメール"
+  - "メールフォーマット"
+---
+
+# Power Platform 包括開発標準スキル
+
+全スキル共通の開発基盤。このスキルが扱うのは **認証 / .env / ソリューション運用** の 3 テーマのみ。
+個別コンポーネントの設計・構築ルールは各専門スキルが持つ（→ [スキルカタログ README](https://github.com/geekfujiwara/CodeAppsDevelopmentStandard/blob/main/.github/skills/README.md)）。
+
+## クイックスタートは認証後の一度の確認から開発デプロイ・検証まで継続する
+
+リポジトリ URL と「クイックスタート」を依頼されたら [quickstart.md](references/quickstart.md) を優先する。
+`.github/agents` / `.github/skills` / `.gitignore` を安全に配置しただけでは停止せず、
+利用可能な環境情報取得 → 共通認証・`.env`・認証キャッシュの再利用検証まで実行する。
+**認証準備後は AskUserQuestion で要望確認し、必ず回答待ちで一旦停止する。**
+資料があれば対象資料からの継続・対象変更・準備までを選べる形にし、
+資料なしならフォルダー名から具体的なアプリ案を複数提示して選んでもらう。
+回答前に資料変換・仕様作成・設計提案へ進まず、継続回答後は Step 0〜3 の契約に従い、
+ルートの業務資料を `spec/input/` へ整理 → `spec-builder` → `architecture`・既存テンプレート提案 →
+認証キャッシュで既存環境・必要時の Azure を調査 → フル構成の開発デプロイ・実動作検証まで進む。
+以降は自分で分かることを調べ、既知事項や通常の実装判断で AskUserQuestion を繰り返さない。
+要望確認の選択肢には、資料・テンプレートに基づく開発デプロイ・テストまでの範囲を明記する。
+白紙の業務ヒアリングではなく、事実・仮説を分けた業務改善と AI 活用の推奨を先に示す。
+業務フローと構成の Mermaid 図をチャットと Markdown の両方へ出す。図は質問ポップアップ内に入れない。
+例外的に本人の判断が不可欠な事項だけ質問し、承認済みの開発範囲では提案の都度停止しない。
+各専門スキルのプレデプロイ・品質テスト・デプロイ後の検証を行い、実際の構成・各 URL・文書を報告する。
+必須構成が全て検証済みの場合だけ「全て完了」とし、未検証・承認待ちは明示する。
+環境スキャンは接続先等のメタデータ取得であり、DLP / ACP・Code Apps 許可の事前診断とは分ける。
+共通認証・承認・既存ファイル保護は省略せず、サインインや回答待ちの後は同じタスクを再開する。
+
+## サブリファレンス（必要に応じて参照）
+
+| リファレンス | 内容 |
+|---|---|
+| [一気通貫クイックスタート](references/quickstart.md) | Step 0〜3: 標準更新・認証後に要望確認で一旦停止し、回答後は仕様・テンプレート・環境調査からフル構成の開発デプロイ・実動作検証まで自律実行する。配置は `scripts/initialize_workspace.py` |
+| [クイックスタートの異常系](references/troubleshooting.md) | 配置の競合・権限不足・資料なしの場合の継続方法と恒久対策 |
+| [Power Platform 開発標準](references/power-platform-development-standard.md) | 設計原則・Phase 別手順・チェックリストをまとめた全体ガイド |
+| [インタラクティブ環境セットアップ](references/interactive-setup.md) | PAC CLI + Dataverse API で `.env` を対話的に構成する手順（**プロジェクト開始時に最初に参照**） |
+| [認証リファレンス](references/auth-patterns.md) | auth_helper.py の詳細実装・認証パターン（Dataverse / Flow / **ARM・Azure SQL・Graph・自前 API** のスコープ一覧を含む） |
+| [.env サンプル](references/.env.example) | 全フェーズ共通の `.env` テンプレート（各テーマで `.env` にコピーして値を設定） |
+| [コネクタ ID カタログ](references/connector-catalog.json) | コネクタの通称（SharePoint / Outlook / SQL 等）→ `shared_xxx` の対応表。`scripts/connector_catalog.py` で解決する |
+| [環境チェック・障害復旧](../admin/SKILL.md) | 明示的なチェック依頼時、または開発・デプロイ障害時だけ使用する。通常開発の事前ゲートにしない |
+| [Dataverse MCP 登録](references/dataverse-mcp-setup.md) | VS Code / Copilot から Dataverse を直接操作する MCP サーバー登録手順（upsert_skill 等） |
+| [ブラウザ自動化方針](references/browser-automation.md) | ブラウザ起動前に **AskUserQuestion で Edge プロファイルを確認**し、回答前は操作しない。ポータル操作は **VS Code 統合 Playwright ブラウザ**（`playwright-browser_navigate` / `playwright-browser_click` / `playwright-browser_type` / `playwright-browser_handle_dialog` 等）を使う。Playwright MCP サーバー・Playwright 単体ブラウザのインストール・起動は禁止 |
+
+### 共有ユーティリティ（複数スキルから参照される横断リファレンス）
+
+以下は単一の専門スキルに属さず複数スキルから参照されるため、共通基盤である standard/references に置いている。各スキルの SKILL.md からリンク済み。
+
+| リファレンス | 主な参照元スキル |
+|---|---|
+| [アイコン作成](references/icon-creation.md) | dataverse / copilot-studio / model-driven-app / generative-page |
+| [HTML メールテンプレート](references/html-email-template.md)・[テンプレートコンポーネント](references/template-components.md) | power-automate / copilot-studio |
+| [デザイン言語（トークン/配色/UXパターン選定）](references/design-language.md) | code-apps / power-pages / azure |
+| [デモ用 PDF 生成（reportlab / 日本語 CID フォント）](references/demo-pdf-generation.md) | dataverse / code-apps / mcp-server |
+| [地図埋め込み（Google Maps iframe・ホスト別 CSP）](references/map-embed-pattern.md) | generative-page / code-apps / power-pages |
+
+## 大前提: 一つのソリューション内に開発
+
+初回に本人が承認したアカウント・Edgeプロファイル・必要時の追加認証許可を
+Git除外済み `.env` の `PP_AUTH_*` 設定へ記録する。
+トークンはOS暗号化キャッシュ、AuthenticationRecordはホームで管理し、`.env` に保存しない。
+`auth_helper.get_token()` は保存済み許可がある場合に限り、追加認証要求からブラウザー認証へ戻る。
+SDK credentialの自動対話は無効のままなので、SDK操作前に共通get_tokenで必要scopeを準備する。
+Code Appsのnpm CLIは別キャッシュとして [認証運用](../code-apps/references/authentication-lifecycle.md) で準備する。
+認証許可は業務書き込みやデプロイの許可を兼ねず、CIでは対話を禁止する。
+
+Dataverse テーブル・Code Apps・Power Automate フロー・Copilot Studio エージェントは **すべて同一のソリューション内** に含める。
+`.env` の `SOLUTION_NAME` と `PUBLISHER_PREFIX` を全フェーズで統一して使用する。
+
+## 既定の開発契約（全スキル共通）
+
+- **SharePoint URL だけでは直接接続の指示と解釈しない。** Code Apps の業務データは **Dataverse に移行して利用**する。URL は既存仕様・移行元の参照情報であり、`shared_sharepointonline` を自動追加しない。SharePoint の継続利用・直接接続が明示された場合だけ例外とする。
+- 移行は [dataverse](../dataverse/SKILL.md) でスキーマを構築し、[data-migration](../data-migration/SKILL.md) で取得済み CSV / JSON のマッピング・承認・投入・照合を行う。URL の受領だけをデータ読み取り・書き込み・削除・同期への承認としない。移行元の変更や削除は行わない。
+- **環境チェックを明示的に依頼されない限り、すぐに開発を開始する。** DLP / ACP、Code Apps 許可、マネージド環境、MCP、管理者ロールの網羅確認を先行させず、管理 API が読めないことを開発停止理由にしない。
+- 既知の対象環境・ソリューション・認証を再利用し、Code Apps は **scaffold → init → ローカル predeploy / build → 対象環境への初回 push** を優先する。初回 push はテーブル全件構築・データ移行・ローカライズの完了を待たない。未接続画面はその旨を表示し、データ接続後に改善デプロイする。
+- 障害時だけ [admin の権限確認付き復旧](../admin/references/development-recovery.md) へ進む。原因に関係する委任権限・対象範囲を確認し、実行可能な診断・承認済み最小修復・限定リトライを行う。権限なし・不明なら無駄な管理操作をせず管理者へ依頼する。
+- これは**事前の網羅的な環境診断を省く**契約であり、既知の組織ポリシー、デプロイ先の確認、設計・移行・公開・設定変更の承認、ローカル品質チェックは省略しない。
+
+## 共通の事前確認契約（会話の最初に 1 回だけ）
+
+依頼文・既存 `.env`・認証プロファイルから分かる事項は再質問せず使う。
+**Code Apps では上の既定の開発契約を優先**し、ローカル開発に不要な管理者確認やライセンス棚卸の回答を待たない。
+実操作に必要な実装先や承認範囲が不明な場合だけ、AskUserQuestion で不足事項を 1 問ずつ確認する。
+クイックスタートでは認証後の要望確認を必ず行い、回答後は既存設定・資料・テンプレート・API 調査で
+分かる事項を自律的に解決する。以下の分類ごとの質問や承認を必須にせず、既存の承認範囲を超える判断だけを確認する。
+以下は確認事項の分類であり、全項目の調査完了を一律の着手条件にしない。以降の Step で同じ内容を聞き直さない。
+
+```text
+既知の値を再利用し、実操作に必要な不足事項だけ確認する。
+1. 対象テナント、Power Platform 環境、Azure サブスクリプションなどの実装先
+2. 開発、テスト、本番のどこまで実施するかと、デプロイまたは公開の承認範囲
+3. 必要な製品ライセンス、容量、プレビュー参加条件が満たされているか
+4. 作成・変更・公開・管理者同意・ロール割り当てを行う担当者と最小権限
+5. 対象ソリューション、パブリッシャー、命名、利用者または公開対象
+6. 認証方式、接続、シークレットストア、データ分類と外部共有の可否
+7. 検証担当者、受け入れ条件、ロールバックまたはクリーンアップ方針
+```
+
+各専門スキルは、この7分類から不要な項目を省き、必要な固有質問を加えた
+「事前確認（会話の最初に 1 回だけ）」を持つ。最低限、次を守る。
+
+- 製品ライセンスとプレビュー制度を別項目として扱う。
+- 「管理者権限が必要」とだけ書かず、工程ごとの最小ロールまたは必要な具体的権限を示す。
+- 開発者が全ロールを持つと仮定せず、ライセンス、公開、管理者同意、Azure RBAC の担当者を分けて記録する。
+- `Global Administrator`、`Owner`、`System Administrator` は、より狭いロールで完了できない工程に限定する。
+- デプロイや公開の前に対象・承認範囲・ローカル品質を確認する。既知の必須条件が未充足ならその操作を停止するが、管理 API による環境診断は明示依頼時・障害時だけとする。
+- 検証チェックリストに、実際の対象環境・公開範囲・承認を確認したことを含める。製品固有の公開・プレビュー承認は各スキルに従う。
+
+## 共通基盤: .env と認証
+
+すべてのデプロイスクリプトは以下の **共通パラメータ** と **共通認証** を使用する。
+各スキルから個別に認証を設定する必要はない。
+
+### .env 共通パラメータ
+
+**推奨: [インタラクティブセットアップ](references/interactive-setup.md)** で `pac` CLI から対話的に `.env` を構成する（PAC 認証 → 環境選択 → パブリッシャー/ソリューション選択を AskUserQuestion で進行）。
+
+**PAC 認証プロファイルがない場合**（PAC CLI 未インストール・auth create 不可）は、**Power Apps ポータル > 設定（右上の⚙）> セッション詳細** から以下の値を取得して手動設定する（インタラクティブセットアップの Step 2 参照）。
+
+```env
+# === 必須（全フェーズ共通）===
+DATAVERSE_URL=https://{org}.crm7.dynamics.com/   # セッション詳細: Instance URL
+TENANT_ID={your-tenant-id}                       # セッション詳細: Tenant ID
+SOLUTION_NAME={YourSolutionName}
+PUBLISHER_PREFIX={prefix}
+
+# === オプション ===
+PAC_AUTH_PROFILE={YourProfileName}         # PAC CLI 認証プロファイル名
+ADMIN_EMAIL=admin@example.com              # Power Automate 通知先
+BOT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx  # Copilot Studio Bot ID（URL でも可）
+```
+
+> **セッション詳細の Environment ID** は `pac auth create --environment {env-id}` でも使用する。
+
+| パラメータ         | 用途                           | 使用フェーズ               |
+| ------------------ | ------------------------------ | -------------------------- |
+| `DATAVERSE_URL`    | Dataverse Web API のベース URL | 全フェーズ                 |
+| `TENANT_ID`        | Azure AD テナント ID           | 全フェーズ                 |
+| `ENV_ID`           | Power Platform 環境 ID         | 全フェーズ                           |
+| `SOLUTION_NAME`    | ソリューション一意名           | 全フェーズ                 |
+| `PUBLISHER_PREFIX` | テーブル・列のプレフィックス   | 全フェーズ                 |
+| `PAC_AUTH_PROFILE` | PAC CLI の認証プロファイル名   | Phase 6 (Code Apps)        |
+| `ADMIN_EMAIL`      | フロー通知先メール             | Phase 5 (Power Automate)   |
+| `BOT_ID`           | Copilot Studio Bot ID or URL   | Phase 7 (Copilot Studio)   |
+
+### 共通認証: auth_helper.py
+
+`./auth_helper.py` が全デプロイスクリプトの認証を一元管理する。
+**同一マシン・同一 OS ユーザー・同一 tenant/client ID のプロジェクト間でキャッシュを共有**する 2 層構成。
+通常は初回だけブラウザ認証し、以後はサイレント更新する。条件付きアクセスのサインイン頻度・
+失効・同意要求で再認証が必要になることはある。有効期間をクライアント側で延長しない。
+
+```
+層1: AuthenticationRecord (~/.power-platform-cli/auth_record_{TENANT_ID}.json)
+  - アカウント情報（テナント・ユーザー ID）を保存
+  - ホームディレクトリ配下の固定パスに永続化（プロジェクトフォルダに依存しない）
+  - そのため、別プロジェクトを新規に開いても再度ブラウザ認証を求められない
+
+層2: TokenCachePersistenceOptions (MSAL OS 資格情報ストア)
+  - リフレッシュトークン・アクセストークンを永続化（同一マシンで共有）
+  - 更新トークンが利用可能ならサイレントリフレッシュ（暗号化必須、平文保存へフォールバックしない）
+
+初期セットアップ: get_token(allow_interactive=True) → キャッシュを優先 → 必要時だけブラウザで認証
+2回目以降（別プロジェクトでも）: キャッシュから自動取得（認証プロンプトなし）
+追加認証が必要な場合: AuthenticationRequiredError → キャッシュを保持し、保存済み継続許可または明示許可でブラウザ認証
+テナント切替: テナント別の既存キャッシュを使い、他テナントのファイルは削除しない
+```
+
+PAC CLI プロファイルでトークンを取得できない場合は、ローカルブラウザでのインタラクティブ認証
+（`InteractiveBrowserCredential`）を使用する。デバイスコード認証は行わず、初回の認証後はキャッシュから
+サイレントにトークンを取得する。
+初期セットアップで tenant/client ID ごとに `get_token(..., allow_interactive=True)` を実行し、
+`AuthenticationRecord` をホームディレクトリの JSON に保存する。トークン自体は JSON に含めず、
+OS 資格情報ストアに保存する。以後のスキルは共通 `auth_helper.py` からキャッシュを再利用し、
+個別の認証フローやプロジェクト内の認証 JSON を作らない。
+`get_credential()` も同じ credential を SDK に渡す。`get_token()` はまずサイレント取得し、
+追加認証要求だけ `PP_AUTH_ALLOW_INTERACTIVE=true` の保存済み継続許可で復旧する。
+許可なし・CIではブラウザを開かない。SDK credential自体の自動対話は無効のままにする。
+`python .github/skills/standard/scripts/verify_auth_cache.py --env .env` で、別作業ディレクトリの
+新規プロセス 2 回からサイレント取得できることを検証する（トークン非表示）。
+Power Apps npm CLI は別 client ID・専用キャッシュのため、直接共有とは区別する
+（[キャッシュ境界](references/auth-patterns.md#power-apps-npm-cli-との境界)）。
+Foundry 上で動作するエージェント本体の Managed Identity など、実行環境固有の資格情報はこのローカル開発者認証の共有対象外とする。
+
+認証の公開 API・パターンの詳細実装は [認証リファレンス](references/auth-patterns.md) を参照。
+
+## 設計・要件ヒアリングは architecture スキルへ
+
+要件ヒアリング → コンポーネント選定 → 全体アーキテクチャ設計は **`architecture` スキル** が担当する。
+Phase 1（設計）の最初に必ず `architecture` を参照し、IT に詳しくないユーザーから業務課題を引き出して設計提案・承認を得てから、各専門スキルでの構築に進む。
+
+→ 詳細: [`architecture`](../architecture/SKILL.md) スキル
+
+## 関連スキルと推奨開発フロー
+
+各スキルの説明・カテゴリ・推奨開発フローは **スキルカタログ** に一元化している（standard には重複記載しない）。
+
+→ [Power Platform Skills カタログ（README）](https://github.com/geekfujiwara/CodeAppsDevelopmentStandard/blob/main/.github/skills/README.md)
+
+## クイックリファレンス: standard が扱うテーマ
+
+このスキルが扱うのは以下の **共通基盤テーマのみ**。
+
+| テーマ | 内容 |
+|---|---|
+| インタラクティブセットアップ | PAC CLI + Dataverse API で `.env` を対話的に構成。環境選択・パブリッシャー/ソリューション選択を AskUserQuestion で進行。詳細は [インタラクティブ環境セットアップ](references/interactive-setup.md) |
+| 共通認証 | `auth_helper.py` による 2 層キャッシュ付きインタラクティブ認証。詳細は [認証リファレンス](references/auth-patterns.md) |
+| 環境チェック・障害復旧 | **明示依頼時または障害時だけ** `admin` を使用。通常は開発・初回デプロイを優先し、障害時は委任権限を確認して診断・最小修復・限定リトライ、権限不足なら管理者へ依頼する |
+| コネクタ ID の解決 | コネクタ ID（`shared_xxx`）を対話プロンプトで聞かずに確定させる。`scripts/connector_catalog.py --resolve sharepoint` で `shared_sharepointonline` を得る。Code Apps のデータソース追加は [`add_data_source.py`](../code-apps/scripts/add_data_source.py) がこれを使って非対話で完走する |
+| Azure リソース操作 | `scripts/azure_helper.py`（ARM / Graph / Azure SQL / 自前 API）。**`az login` 前提の手順は書かない** — 対話が必要でテナント列挙のハングやセッション失効により非対話完走が崩れるため |
+| `.env` パラメータ | 全フェーズ共通の環境変数（`DATAVERSE_URL` / `TENANT_ID` / `SOLUTION_NAME` / `PUBLISHER_PREFIX` 等）の一元管理 |
+| ソリューション運用 | 全コンポーネントを同一ソリューションに含める。`SOLUTION_NAME` / `PUBLISHER_PREFIX` を全フェーズで統一 |
+
+> **個別の構築ルール・トラブルシューティング**（Copilot Studio・Code Apps・Power Automate・Dataverse・Security Role・AI Builder・Model-Driven App 等）は **各専門スキルの SKILL.md / references** に記載している。standard には重複して持たない。
+> どのスキルに何があるかは [スキルカタログ README](https://github.com/geekfujiwara/CodeAppsDevelopmentStandard/blob/main/.github/skills/README.md) を参照。

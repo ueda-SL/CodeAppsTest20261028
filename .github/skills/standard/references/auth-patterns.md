@@ -1,0 +1,382 @@
+# Power Platform 認証パターンリファレンス
+
+## インタラクティブ認証
+
+PAC CLI プロファイルが利用できない場合、`auth_helper.py` は `InteractiveBrowserCredential` を使ってローカルブラウザから認証する。
+デバイスコード認証への切り替えやフォールバックは行わない。初回の認証後は、
+`AuthenticationRecord` と MSAL 永続トークンキャッシュを使ってサイレントにトークンを更新する。
+
+- 初回・ポリシーによる追加認証のみブラウザを使う。キャッシュ取得・サイレント更新は非対話プロセスでも利用できる
+- 開発環境の初期セットアップでは、`setup_environment.py --auth-only`（または `--profile`）から
+  `auth_helper.get_token(allow_interactive=True)` を呼び、キャッシュを先に試す。追加認証が必要な場合だけ
+  ブラウザを開いて認証レコードを保存する。別 client ID でも同じ引数で明示的に初期化できる
+- `AuthenticationRecord` は `~/.power-platform-cli/auth_record_{TENANT_ID}.json` に保存する。
+  これはアカウント・テナント情報の JSON であり、アクセストークンやリフレッシュトークンは含めない。
+  トークンは `TokenCachePersistenceOptions` により OS 資格情報ストアへ永続化する
+- 以降の開発・運用スクリプトは同じ tenant/client ID のキャッシュを `auth_helper.get_token()` 等で再利用し、
+  スクリプトごとのサインインや独自の認証キャッシュを実装しない
+
+## 前提: キャッシュを優先し、承認済み追加認証だけ復旧する
+
+開発環境のセットアップで tenant/client ID ごとの初回サインインを済ませる。新規に作成・実行するスクリプトは、
+**初回のインタラクティブ認証がキャッシュ済みであること**を前提に、以降は共有キャッシュを再利用する。
+本人がアカウント・Edgeプロファイル・継続許可を確認したら、
+`.env` の `PP_AUTH_MODE=browser` / `PP_AUTH_ACCOUNT` / `PP_AUTH_EDGE_PROFILE` /
+`PP_AUTH_ALLOW_INTERACTIVE=true` に保存する。
+`get_token()` は追加認証要求を受けた場合だけこの許可で復旧する。
+CIと許可なしではブラウザーを開かず、SDK credentialの自動対話も無効のままにする。
+設定保存とPython/npm CLI両キャッシュの準備は
+[Code Apps認証運用](../../code-apps/references/authentication-lifecycle.md)を参照する。
+初回認証でも、条件付きアクセスのサインイン頻度・失効・同意要求等による
+再認証を永久に不要にはできない。トークンの有効期間は Entra ID が決め、キャッシュ側では延長しない。
+
+認証レコード（`AuthenticationRecord`）は **`~/.power-platform-cli/auth_record_{TENANT_ID}.json`（ホームディレクトリ配下、テナント別ファイル）にマシン全体で共有保存**される。明示した client ID を使う場合はファイル名も client ID ごとに分かれる。そのため、同じ tenant/client ID なら別プロジェクト・別リポジトリのスクリプトでもレコードと OS 資格情報ストアのトークンキャッシュを再利用できる。
+
+- 認証は必ず `auth_helper.py` 経由（`requests` 直呼び出し・MSAL 直接呼び出しは禁止）
+- `api_get` / `api_post` などは `requests.Response` ではなく解析済みの値（`dict` / `str` / `None`）を返すため、戻り値に `.json()` を呼ばない
+- スクリプト内でユーザーに認証情報の入力を求めるプロンプトを出さない
+- 認証レコードやトークンキャッシュをリポジトリ、`.env`、ログへコピーしない。JSON はホームディレクトリ外へ移動しない
+- 追加認証要求は共通helperで正常運用として扱う。403・通信障害・キャッシュ読み取り失敗はブラウザー認証に変換しない
+- テナント切替は `.env` の `TENANT_ID` を変更し、そのテナントの既存キャッシュを使う（他テナントのキャッシュを壊さない）。
+  同一テナント内の別アカウントへの切替とは区別する。共有対象は同一マシン・同一 OS ユーザーのキャッシュであり、
+  他の OS ユーザーやマシンへ持ち出さない
+- `PP_AUTH_ACCOUNT` が同一テナントの既存レコードと異なる場合は停止する。
+  別アカウントは承認済みの別 `PP_AUTH_RECORD_PATH` を選択し、既存レコードを削除しない
+
+### キャッシュ継承の検証
+
+```powershell
+python .github/skills/standard/scripts/verify_auth_cache.py --env .env
+# 別 client ID の初回認証（明示的なセットアップでのみ実行）
+# get_token(scope, client_id, allow_interactive=True)
+```
+
+検証は別作業ディレクトリの新規 Python プロセスを 2 回起動し、PAC プロファイルではなく既存の
+OS 保護キャッシュから取得する。トークンを表示・ファイル出力せず、ブラウザも開かない。
+メモリ上の有効期限が 60 秒未満になると、同じ credential からサイレント更新する。
+認証・権限・通信エラーをキャッシュ破損とみなして永続化を無効にしたり、キャッシュを削除したりしない。
+暗号化できない OS では平文トークン保存へフォールバックせず、明示的なエラーとする。
+
+### Power Apps npm CLI との境界
+
+`auth_helper` の共有は同一 tenant/client ID の Python/SDK 間である。Power Apps CLI 1.3.0 は
+別 client ID・専用の暗号化キャッシュを使い、外部アクセストークンを受け取る公開オプションは確認できない。
+`auth_helper` のトークンや更新トークンを CLI キャッシュへコピーしない。
+CLI ではまず既存キャッシュのサイレント取得を使い、実際に追加認証が要求された場合だけ
+保存済み許可に従って `pa_cli.py` が実コマンドを対話コンソールで実行する。
+初回は `setup_code_app_auth.py` で指定アカウントを準備し、app init後に接続resourceも確認する。
+これはCLI専用キャッシュであり、`auth_helper` からの直接引き継ぎとは報告しない。
+CLIはOS既定ブラウザーを開き、保存したEdgeプロファイルを強制指定する公開機能はない。
+必要なら本人が保存済みプロファイルを選ぶ。device-codeは使わない。
+
+公式 API: [InteractiveBrowserCredential](https://learn.microsoft.com/en-us/python/api/azure-identity/azure.identity.interactivebrowsercredential?view=azure-python)、
+[TokenCachePersistenceOptions](https://learn.microsoft.com/en-us/python/api/azure-identity/azure.identity.tokencachepersistenceoptions?view=azure-python)。
+
+```python
+from auth_helper import get_token, get_session, api_get, api_post, api_patch, api_delete, retry_metadata
+
+# Dataverse Web API 用トークン（デフォルトスコープ）
+token = get_token()
+
+# Flow API 用トークン（スコープ指定）
+token = get_token(scope="https://service.flow.microsoft.com/.default")
+
+# PowerApps API 用トークン（接続検索用）
+token = get_token(scope="https://service.powerapps.com/.default")
+
+# Bearer ヘッダー付き Session
+session = get_session()
+
+# Dataverse CRUD ヘルパー（requests.Response ではなく解析済みの値を返す）
+rows = api_get("accounts?$top=1")                                   # -> dict（.json() は不要）
+account_id = api_post("accounts", {"name": "Test"}, solution="SolutionName")  # -> str | None（作成された ID）
+api_patch("accounts(id)", {"name": "Updated"})                      # -> None
+api_delete("accounts(id)")                                          # -> None
+
+# メタデータ操作のリトライ（0x80040237, 0x80044363 対応 + ネットワーク切断/429スロットリング対応）
+retry_metadata(lambda: api_post("EntityDefinitions", body), "テーブル作成")
+
+# Flow API ヘルパー
+from auth_helper import flow_api_call
+flow_api_call("GET", f"/providers/Microsoft.ProcessSimple/environments/{env_id}/flows")
+```
+
+## Azure リソース操作も auth_helper で行う（`az login` 不要）
+
+`get_token(scope=...)` は Dataverse 以外の任意のスコープに使える。**Azure CLI / Azure PowerShell に依存した手順は書かない**。
+`az login` は対話が必要なうえ、テナント列挙でハングしたりセッション失効で手順が止まるため、非対話で完走するという前提を壊す。
+
+| 用途 | スコープ |
+|---|---|
+| Azure Resource Manager（リソース作成・設定取得） | `https://management.azure.com/.default` |
+| Azure SQL Database（Entra ID 認証） | `https://database.windows.net/.default` |
+| Microsoft Graph（アプリ登録・権限操作） | `https://graph.microsoft.com/.default` |
+| Power Platform 管理 API（環境設定・Code Apps の CSP 等） | `https://api.powerplatform.com/.default` |
+| BAP 管理 API（環境一覧・環境プロパティ） | `https://service.powerapps.com/.default` |
+| 自前 API（Azure Functions 上の MCP Server 等） | `api://{app-id}/.default` |
+
+`scripts/azure_helper.py` が ARM / Graph の薄いラッパーを提供する。
+
+```python
+from azure_helper import arm_get, arm_post, graph_get, graph_patch, get_app_settings, get_sql_access_token
+
+# Function App のアプリ設定を取得（az functionapp config appsettings list の代替）
+settings = get_app_settings(subscription_id, "rg-example", "func-example")
+
+# Azure SQL に Entra ID トークンで接続
+sql_token = get_sql_access_token()
+
+# アプリ登録を Graph で更新
+app = graph_get("/applications?$filter=appId eq '{app-id}'")
+```
+
+> **自前 API のトークンが `AADSTS650057` になる場合**は、呼び出し側の問題ではなくアプリ登録側の設定不足。
+> 対象アプリで **OAuth2 スコープを公開**し、**パブリッククライアントを事前承認**する必要がある
+> （→ [mcp-server スキル](../../mcp-server/SKILL.md)）。
+
+#### `retry_metadata()` がリトライ／スキップする条件（★ 2026-07 拡張）
+
+| 条件 | 対処 |
+|---|---|
+| `already exists` / `0x80040237` / `0x80044363` | スキップ（べき等・`None` を返す） |
+| `another ... running`（メタデータロック競合） | 累進的に待機してリトライ |
+| `requests.exceptions.ConnectionError` / `Timeout`（一時的なネットワーク切断） | 累進的に待機してリトライ |
+| HTTP `429` / `503`（スロットリング） | `Retry-After` ヘッダーを尊重して待機・リトライ |
+| 上記いずれかを `max_attempts`（既定 5）回リトライしても解消しない | **`RuntimeError` を送出**（`None` を返して黙って成功扱いにしない） |
+
+`ThreadPoolExecutor` で多数テーブル・多数列を並行構築するような長時間バッチでは、
+上記のネットワーク断／スロットリングが避けられない。これらを想定外エラーとして
+即座に再送出すると、1 回の一時的な通信エラーでビルド全体がクラッシュするため、
+`retry_metadata()` 側で吸収する（詳細は [dataverse スキルの troubleshooting](../../dataverse/references/troubleshooting.md#8-threadpoolexecutor-並行構築中の一時的なネットワーク切断スロットリングでビルド全体が停止する) を参照）。
+
+一方、**リトライ上限に達した場合は「既に存在するのでスキップ」とは区別して例外を送出する**
+（`None` を返さない）。呼び出し元がこれを検知できないと、実際には作成されなかった
+列/Lookup が「成功扱い」のまま後続の Step（公開等）に進んでしまう
+（詳細は [troubleshooting.md #14](../../dataverse/references/troubleshooting.md#14-ロック競合でリトライ上限に達しても-retry_metadata-が例外を投げず-lookup-が未作成のまま後続処理が成功扱いで進んでしまう) を参照）。
+
+#### 認証テスト
+
+```bash
+# 初回はローカルブラウザで認証する。以降はサイレント。
+python -c "import sys; sys.path.insert(0, '.github/skills/standard/scripts'); from auth_helper import get_token; print(get_token()[:20] + '...')"
+```
+
+#### Windows PowerShell で `auth_helper.py` 等のログ（日本語）が文字化けする（`chcp 65001` だけでは直らない）
+
+`auth_helper.py` の `[auth_helper] 認証キャッシュをロードしました...` のような日本語ログを
+PowerShell（pwsh 7.x を含む）でリダイレクト/`Tee-Object`しながら実行すると、
+`chcp 65001` を実行済みでも `隱崎ｨｼ...` のように文字化けすることがある。
+
+原因は `chcp 65001` が Windows の**コンソールコードページ**を切り替えるだけで、
+PowerShell が子プロセス（`python.exe`）の出力を解釈する **`[Console]::OutputEncoding`
+（.NET プロパティ）には自動反映されない**ため。`chcp` 実行後でも
+`[Console]::OutputEncoding` が cp932（Shift-JIS）のまま残っていることがある。
+
+**対策**: `auth_helper.py` を使うスクリプトを実行する前に、`chcp 65001` に加えて
+`[Console]::OutputEncoding` を明示的に UTF-8 へ設定する（全スキル共通）。
+
+```powershell
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001
+python -u <script>.py 2>&1 | Tee-Object -FilePath <log>.log
+```
+
+詳細は [dataverse スキルの troubleshooting #13](../../dataverse/references/troubleshooting.md#13-windows-powershell-でログをファイルにリダイレクトtee-objectすると日本語が文字化けするchcp-65001-だけでは直らない) を参照。
+
+#### PowerShell で `python -c "..."` に OData クエリを渡すと壊れる
+
+`$select` / `$filter` などの `$` を含む Python コードを `python -c "..."` として
+PowerShell の二重引用符内に書くと、ネストした Python 文字列の中であっても PowerShell が
+`$select` / `$filter` を**変数展開**しようとして空文字列に置き換えてしまう
+（`EntityDefinitions?=uniquename,...` のように `$` 以降が消えた URL になる）。
+
+**対策**: `$` を含む OData クエリを扱うコードは `-c` のワンライナーにせず、一時的な
+`.py` ファイルに書いて `python <file>.py` で実行する。実行後は忘れずに削除する。
+
+#### MSAL Python 3.14 互換性問題
+
+MSAL 内部トークンキャッシュ (`msal/token_cache.py`) で以下の症状が報告された。
+型エラーだけでは Python バージョンやキャッシュ破損が原因とは断定できない。
+
+**症状**: 初回 API コールは成功するが、2回目以降で `TypeError: sequence item 0: expected str instance, dict found` が発生。`target=" ".join(target)` で scopes が dict として格納されている。
+
+**対策** (`auth_helper.py` 実装済み):
+
+1. `_inmemory_tokens` dict でスコープ別にトークンをインメモリキャッシュ
+2. 期限 60 秒前から同じ永続 credential で再取得し、更新トークンをサイレント利用
+3. `TypeError` / 一般的な認証エラーは送出し、キャッシュを捨てた再構築はしない
+4. `PP_NO_PERSISTENT_CACHE` は既存の診断用オプションとしてのみ保持する。設定すると警告し、
+   プロセス間の再利用は保証しない。通常運用ではこの環境変数を解除し、キャッシュを削除しない
+
+#### マルチテナント切り替え時の認証キャッシュ分離（★ 2026-07 検証済み）
+
+**症状**: 同一マシンで複数テナント（例: 顧客Aの環境 / 自分の検証用環境）を行き来すると、
+別テナントの認証レコードが読み込まれ、サイレント認証に失敗する。
+
+**原因**: 旧実装では `AuthenticationRecord` を `~/.power-platform-cli/auth_record.json` という
+**単一の共有ファイル**に保存していた。テナント A で認証 → テナント B に `.env` を切り替えて認証すると、
+テナント B の記録がテナント A の記録を**上書き**してしまう。その後テナント A に戻ると、
+ファイルには存在するがテナント B のレコードが入っているため、MSAL のサイレント認証が失敗し
+再度ブラウザでサインインが必要になる。
+
+**対策**（`auth_helper.py` 実装済み）:
+
+1. `AUTH_RECORD_PATH` を `~/.power-platform-cli/auth_record_{TENANT_ID}.json` のように
+   **テナント ID ごとにファイルを分離**する
+2. 旧単一ファイルからの移行時は、中身の `tenantId` が現在の `TENANT_ID` と一致する場合のみ移行する
+   （不一致なら移行せず、そのテナント用にブラウザで再認証する）
+3. ロードした `AuthenticationRecord.tenant_id` が `.env` の `TENANT_ID` と食い違う場合は
+   ファイルを保持したまま明示的に停止する（防御的チェック）
+
+```
+❌ 旧パターン: 全テナント共通で ~/.power-platform-cli/auth_record.json 1 本
+   → 後から認証したテナントで上書きされ、テナントを往復するたびにブラウザ認証が必要
+
+✅ 新パターン: ~/.power-platform-cli/auth_record_{TENANT_ID}.json をテナントごとに保持
+   → 各テナントで最初にブラウザ認証をすれば、以降は往復してもキャッシュが残る
+```
+
+複数テナントを扱わない（常に単一テナントのみ）場合はこの問題は発生しない。
+
+#### `pac auth token` サブコマンドが存在しない pac CLI ディストリビューションがある
+
+**症状**: `.env` に `PAC_AUTH_PROFILE` を設定していても、毎回ブラウザ認証にフォールバックする
+（エラーメッセージは出ないため気づきにくい）。
+
+**原因**: `auth_helper.py` の PAC CLI 経由トークン取得は `pac auth token --resource <resource>` を
+呼び出すが、pac CLI のディストリビューション/バージョンによっては（例: npm 版
+`power-platform-cli` 2.9.3 系 `.NET Framework 4.8` ビルド）`auth token` サブコマンド自体が
+存在せず `Not a valid command` エラーになる。`auth_helper.py` はこれを検知して InteractiveBrowserCredential にフォールバックする
+（動作はするが高速化の恩恵がない）。
+
+**確認方法**:
+
+```powershell
+pac auth --help
+# Usage: pac auth [create] [list] [select] [delete] [update] [name] [clear] [who]
+# ↑ "token" が一覧に無ければこの問題に該当する
+```
+
+**対策**: 現状はブラウザ認証へのフォールバックで機能上の問題はない（テナント別キャッシュ分離により
+往復しても再認証されない）。`pac auth token` に対応した pac CLI バージョンに更新できる場合は
+更新するとトークン取得が高速化する。
+
+#### Power Platform 管理 API が `403 InsufficientDelegatedPermissions` になる（★ 2026-09 検証済み）
+
+**症状**: `https://api.powerplatform.com/environmentmanagement/...` を叩くと 403 が返る。
+
+```json
+{"code":"Forbidden","innererror":{"code":"InsufficientDelegatedPermissions",
+ "message":"Application missing required delegated permissions: [EnvironmentManagement.Settings.Read, All.All.ReadWrite]"}}
+```
+
+**原因**: `auth_helper.get_token()` の既定クライアント（azure-identity の Azure CLI 互換クライアント）と
+`az account get-access-token` は同じアプリで、Power Platform API の `EnvironmentManagement.*` 委任アクセス許可を
+持っていない。トークン自体は問題なく発行されるので、認証エラーではなく**認可エラー**として現れる。
+
+**対策**: 403 を検出したら Power Platform CLI のパブリック クライアント
+`9cee029c-6210-4654-90bb-17e6e9d36617` を `client_id` に指定して再試行する。
+既定クライアントで通る API まで巻き込まないよう、**先に既定クライアントで試し 403 のときだけ切り替える**。
+
+```python
+CLIENT_IDS = [None, "9cee029c-6210-4654-90bb-17e6e9d36617"]  # 既定 → PAC CLI の順で試す
+
+def send(method, url, **kwargs):
+    for client_id in CLIENT_IDS:
+        token = get_token(scope="https://api.powerplatform.com/.default", client_id=client_id)
+        res = requests.request(method, url, headers={"Authorization": f"Bearer {token}"}, **kwargs)
+        if res.status_code != 403:
+            res.raise_for_status()
+            return res
+    res.raise_for_status()
+```
+
+**初回だけ対話が必要**: `client_id` を変えると `AuthenticationRecord` も
+`auth_record_{TENANT_ID}_{CLIENT_ID}.json` に分離されるため、そのクライアント初回はサインインが走る。
+ローカルブラウザでサインインし、2 回目以降はキャッシュから無操作で解決される。
+
+**実装例**: [Code Apps の CSP 構成スクリプト](../../code-apps/scripts/configure_code_app_csp.py)
+
+#### `az login` は auth_helper.py と全く別の資格情報ストア（★ 2026-07 検証済み）
+
+**症状**: `auth_helper.py`（Python / MSAL）側は認証済みなのに、FlowAgent MCP サーバー等
+Azure CLI（`az`）ベースで認証するツールを使うたびに `az login` を求められる。
+複数テナント（顧客環境・自分の検証環境等）を行き来していると、その都度ブラウザでの
+インタラクティブログインを要求されがちで煩わしい。
+
+**原因**: `az login` は `~/.azure` 配下の**独自トークンキャッシュ**を使い、
+`auth_helper.py` の MSAL キャッシュ（`~/.power-platform-cli/`）とは完全に別物。
+Python 側で認証済みでも Azure CLI 側の資格情報には反映されない。
+
+**対策（❌ 新規ログインを急がない）**:
+
+```powershell
+# ✅ まず az account list で対象テナント/アカウントが既にキャッシュ済みか確認する
+az account list -o table --all
+
+# ある場合 → az login 不要。account set で切り替えるだけで済む（対話不要）
+az account set --subscription <該当テナントの SubscriptionId>
+
+# 無い場合のみ、その回だけ az login --tenant <tenant-id> が必要
+# （az login は一度実行したアカウントを上書きせず、az account list に追加保持される。
+#   pac の AuthenticationRecord のような「単一ファイル上書き」問題は az login には無い）
+```
+
+```
+❌ いきなり az login --tenant {id} を実行してユーザーにブラウザ操作を依頼する
+   → az account list に既に対象テナントのアカウントがあれば不要な手間
+
+✅ 先に az account list -o table --all を確認 → あれば az account set のみ（対話不要）
+✅ 無い場合のみ、初回の1回だけインタラクティブ az login を依頼する
+✅ 依頼する際は「ブラウザでアカウントを選択してください」等、必要な操作を明確に伝える
+```
+
+#### FlowAgent MCP（Node.js プロセス）は Python の auth_helper.py を直接使えない・独自の多層キャッシュを持つ（★ 2026-07 検証済み）
+
+**症状**: `az account set` で対象テナント（テナント A）に切り替え、`az account show` でも
+正しいテナントが表示されているのに、FlowAgent MCP のツール（例: `list_connections`）を呼ぶと
+別テナント（テナント B）向けの 404 (`ServiceToServiceEnvironmentNotFound`) が返る。
+
+**原因（アーキテクチャ上の制約 + プロセス内キャッシュの罠）**:
+
+1. FlowAgent MCP は Python の `auth_helper.py` とは**別言語・別プロセス**（Node.js）で動く
+   サードパーティ製バンドルのため、**auth_helper.py を直接呼び出すことは技術的に不可能**。
+2. その代わり FlowAgent MCP は多くの操作で `az account get-access-token`（az CLI 自体が
+   保持する資格情報）に委譲する設計になっている（`packages/core/dist/auth/az-cli-auth.js`
+   の `AzCliTokenProvider`）。これは思想的には auth_helper.py と同じ「一度サインインした
+   ものを使い回す」パターンであり、正しく機能すれば問題ない。
+3. **しかし** `AzCliTokenProvider` は取得したトークンを **`resource` 単位でプロセス内メモリに
+   キャッシュ**しており、テナント/アカウントの区別なく再利用する。そのため:
+   - FlowAgent サーバープロセスが起動した時点（または前回そのリソースへ初めてアクセスした
+     時点）で az CLI のアクティブテナントがテナント B だった場合、その後 `az account set`
+     でテナントを切り替えても、**既に起動中の同じサーバープロセスは古いテナントのトークンを
+     メモリキャッシュから返し続ける**（トークン有効期限＝60〜90分程度は再現し得る）。
+   - 加えて `%LOCALAPPDATA%\flowagent\msal-cache\common.json`（接続管理 API 専用の MSAL
+     インタラクティブ認証キャッシュ）も、`PA_TENANT_ID` 環境変数や az CLI のテナントが
+     未確定の状態で一度作成されると `"common"` という**テナント非依存の単一ファイル**に
+     なり得る（auth_helper.py で修正済みの「単一共有キャッシュ」バグと同型）。
+
+**対策**:
+
+```powershell
+# 1. az CLI のアクティブテナントが対象と一致するか必ず確認してから使う
+az account show --query tenantId -o tsv
+
+# 2. 一致しなければ切り替える（対話不要・既存キャッシュがあれば）
+az account set --subscription <対象テナントの SubscriptionId>
+
+# 3. ★ 最重要: テナントを切り替えたら、既に起動中の FlowAgent MCP サーバーを
+#    必ず再起動する（VS Code コマンドパレット → MCP: List Servers → Restart）。
+#    再起動しないと、プロセス内メモリキャッシュの古いテナントのトークンを使い続ける。
+```
+
+`.vscode/mcp.json` の env には保険として `PA_TENANT_ID` と `AZURE_TENANT_ID` の両方を
+設定しておく（`az account show` が失敗した場合のフォールバックとして機能する）。
+
+**マルチテナント運用の原則**:
+- マルチテナントは例外ではなく前提として扱う。テナントを切り替える操作（`.env` の
+  `TENANT_ID` 変更、`az account set` 等）を行った直後は、**関連する全ての長時間駆動プロセス
+  （MCP サーバー等）の再起動が必要**という前提でチェックリスト化する。
+- 対象テナント・環境が一意に決まらない場合は、`vscode_askQuestions` ツールが使える場面では
+  それでユーザーに選ばせる。利用できないセッションでは、チャット内で候補を提示し
+  テキストで確認する。

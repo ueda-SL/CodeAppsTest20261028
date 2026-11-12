@@ -1,0 +1,693 @@
+---
+name: cowork
+description: "目的特化型の Copilot Cowork プラグイン（M365 アプリパッケージ）を開発する。Agent Skills（SKILL.md）と Dataverse MCP コネクタをセットにし、Entra ID の OAuth 2.0 認可コードフロー認証を構成して Teams 開発者ポータルで registrationId を取得、M365 管理センターのエージェント画面からアップロード・公開して Cowork から Dataverse を利用可能にする。"
+category: automation
+triggers:
+  - "Cowork"
+  - "Cowork プラグイン"
+  - "Copilot Cowork"
+  - "Frontier"
+  - "M365 アプリパッケージ"
+  - "agentSkills"
+  - "agentConnectors"
+  - "Agent Skills"
+  - "SKILL.md"
+  - "Dataverse MCP コネクタ"
+  - "自前 MCP を Cowork で使いたい"
+  - "Cowork に MCP Server を追加"
+  - "remoteMcpServer"
+  - "OAuthPluginVault"
+  - "Teams 開発者ポータル"
+  - "OAuth client registration"
+  - "SSO client registration"
+  - "referenceId"
+  - "Enterprise Token Store"
+  - "サイドロード"
+  - "カスタムアプリのアップロード"
+  - "M365 管理センター"
+  - "Cowork スキル"
+---
+
+# Cowork プラグイン開発（Dataverse MCP セット）
+
+目的特化型の **Copilot Cowork プラグイン**（M365 アプリパッケージ `.zip`）を作る。
+ビジネススキル（`SKILL.md`）と **Dataverse MCP コネクタ**をセットにし、**Entra ID の OAuth 2.0 認可コードフロー認証**で
+Cowork から Dataverse を直接操作できるようにする。
+
+> **データ先は Dataverse だけではない**: `agentConnectors` は remote MCP server を指すため、
+> [mcp-server スキル](../mcp-server/SKILL.md) で構築した **自前 MCP Server（Azure Functions）** も
+> 同じようにコネクタにできる。基幹 DB・ファイルサーバー・業務 API など **Dataverse に無いデータ**を
+> Cowork から扱う場合は [自前 MCP Server をコネクタにする](references/custom-mcp-connector.md) を併せて読む
+> （差分は Step 3 の権限・Step 4 の可否・Step 5 の Scope・Step 6 の URL の 4 点だけ）。
+
+> 前提: 利用テナントが [Frontier プレビュー](https://adoption.microsoft.com/en-us/copilot/frontier-program/) に参加していること。
+> **会社環境で Cowork の利用が許可されている場合のみ**このスキルを使用してください。利用可否が不明な場合は管理者に確認してください。
+> 異常系・トラブルシュートは [references/troubleshooting.md](references/troubleshooting.md) を参照。
+
+## サブリファレンス
+
+| リファレンス | 内容 |
+|---|---|
+| [自前 MCP Server をコネクタにする](references/custom-mcp-connector.md) | Dataverse 外のデータ（基幹 DB / ファイルサーバー / 業務 API）を Cowork から扱う場合の差分手順 |
+| [営業支援 CRM プラグイン テンプレート](templates/sales-crm-plugin/README.md) | 予定表・メール・チャットからの活動登録 / 目標達成プラン / マネージャーの障害レビュー。Code Apps の `templates/sales-crm` と同じ Dataverse を共有し、scaffold で生成する |
+| [株主総会 想定問答アシスタント テンプレート](templates/agm-qa-plugin/README.md) | IR 抜粋を根拠に想定問答とリハーサル台本を**下書き**で登録・想定問答の点検。Code Apps の `templates/agm-qa-assist` と同じ Dataverse。変数は `--questions` で AskUserQuestion |
+| [店長アシスト テンプレート](templates/store-assist-plugin/README.md) | 店長の判断基準で品目ごとの発注案（夕方便・朝便・仕込み）→ 承認後だけ発注を登録・本部通達の整理・週次店舗レポート。結果は Render UI のグラフ（単位ごと）・表・HTML レポート（共通ルールの差し込みと `report_builder.py`）。Code Apps の `templates/store-ordering` と同じ Dataverse。変数は `--questions` で AskUserQuestion |
+| [必要な権限の案内](references/permissions.md) | 作る・同意する・登録する・公開する・使う人ごとの最小の権限と、利用者の Dataverse ロールの作り方（scaffold 直後に担当者と確認） |
+| [異常系・トラブルシュート](references/troubleshooting.md) | 実際に踏んだ失敗と恒久対策 |
+| [結果の見せ方（Render UI のグラフ・表・HTML レポート）](references/visual-output.md) | 提案するスキル・数字を扱うスキルの出力の標準。差し込む共通ルール [display-rules.md](references/display-rules.md)・ひな形 [report-template.html](references/report-template.html) |
+
+## パッケージ構成（Skills + remote connector）
+
+```
+<plugin-root>/
+├── manifest.json                 # M365 Unified App Manifest v1.28
+├── color.png                     # 192×192 フルカラーアイコン
+├── outline.png                   # 32×32 アウトラインアイコン
+├── build-package.ps1             # .zip 生成（検証付き）
+└── skills/
+    └── <skill-name>/             # kebab-case。フォルダ名 = SKILL.md の name と一致必須
+        └── SKILL.md              # frontmatter(name/description) + ワークフロー本文
+```
+
+## 事前確認（会話の最初に 1 回だけ）
+
+本スキルの利用が確定したら、[standard の共通契約](../standard/SKILL.md#共通の事前確認契約会話の最初に-1-回だけ)に加え、
+**1 回の AskUserQuestion で次をまとめて確認する**。
+
+| # | 質問 | 合格条件 |
+|---|---|---|
+| 1 | Cowork と Frontier を会社が許可し、対象者を登録済みか | 管理者とテストユーザーに Microsoft Copilot ライセンスがあり、Frontier 対象ユーザーである |
+| 2 | Dataverse MCP を使う対象環境とテーブルはどれか | `DATAVERSE_URL`、論理名、データ分類、許可する read / write 操作が確定している |
+| 3 | Entra OAuth アプリを作成・変更する担当者は誰か | アプリ登録を作成でき、必要な API permission を構成できる担当者を記録している |
+| 4 | 管理者同意と MCP クライアント許可の担当者は誰か | tenant-wide consent の担当者と、環境の `allowedmcpclients` を変更できる担当者を記録している |
+| 5 | Teams Developer Portal と M365 管理センターの担当者は誰か | OAuth registration ID を作成でき、`AI Administrator` がパッケージの追加・公開・配布を実行できる |
+| 6 | 公開対象と検証範囲はどこまでか | 最初は単一テストユーザーまたはセキュリティ グループ、1 skill + 1 connector で合意している |
+
+> 担当ごとの必要な権限は [references/permissions.md](references/permissions.md) を見せて確認する（同意できるロール: クラウド アプリケーション管理者・アプリケーション管理者・AI 管理者）。
+
+Frontier は Cowork を利用するためのプレビュー条件であり、Microsoft Copilot ライセンスとは別に確認する。
+`Global Administrator` を常用せず、Agent 管理は `AI Administrator`、全テナントへの高権限な
+OAuth 同意が必要な場合は `Privileged Role Administrator` を担当工程だけに使用する。
+
+前提チェック:
+
+1. `python .github/skills/standard/scripts/check_mcp_client.py cowork` が ✅ であること。
+2. Python 3（auth_helper.py / アイコン生成）と PowerShell（パッケージビルド）が利用可能であること。
+3. いずれかの前提が未確認なら、アプリ登録・シークレット作成・公開へ進まないこと。
+
+## スキル同梱スクリプト（再利用）
+
+`scripts/` のスクリプトは汎用化されており、どのテナント・環境でも `.env`（`TENANT_ID` /
+`DATAVERSE_URL` / `PUBLISHER_PREFIX` / `COWORK_OAUTH_CLIENT_ID`）を参照して動作する。
+
+| スクリプト | 用途 |
+|---|---|
+| [scripts/setup_entra_oauth_graph.py](scripts/setup_entra_oauth_graph.py) | **（推奨）** Entra OAuth クライアントアプリを Microsoft Graph API 経由で作成。standard の auth_helper.py が共有するブラウザー認証キャッシュを利用（Step 3） |
+| [scripts/setup_entra_oauth.ps1](scripts/setup_entra_oauth.ps1) | （代替）az CLI 経由で同等の処理。az CLI のブラウザーサインインと独立した資格情報キャッシュを使う（Step 3） |
+| [scripts/register_mcp_client.py](scripts/register_mcp_client.py) | Client ID を Dataverse 許可 MCP クライアント（`allowedmcpclients`）に登録・有効化・確認（Step 4） |
+| [scripts/diagnose_cowork_connector.py](scripts/diagnose_cowork_connector.py) | アプリ登録・admin consent・allowedmcpclients の3層をまとめて診断（Step 4→5 の間で実行推奨） |
+| [scripts/check_oauth_signins.py](scripts/check_oauth_signins.py) | Entra のサインイン ログから、Cowork がこの OAuth アプリでトークンを取得できたかを集計し、テナント側か Cowork 側かを判定（Step 9 で接続済みなのにツールが使えないとき。読み取りのみ） |
+| [scripts/build_agent_package.ps1](scripts/build_agent_package.ps1) | `.env` の `COWORK_OAUTH_REGISTRATION_ID`（引用符付きでも可）を manifest.json のプレースホルダーに注入し、必須ファイルとコネクタ ID（汎用 ID・重複の禁止）を検証して .zip を生成（Step 7） |
+| [scripts/check_visual_output.py](scripts/check_visual_output.py) | スキルの結果の見せ方が省かれない書き方かを確かめる（提案するスキルに Render UI のグラフの手順があるか・「このスキルのグラフ」・同梱の report_builder.py・「返す前の確認」・ひな形の図とレポートの行・ほかのスキルへの参照・条件付きの書き方・同梱 HTML のスクリプト）。`--compose` で書き途中の SKILL.md をビルドと同じ差し込みで検査。`build_agent_package.ps1` からも呼ばれる。読み取りのみ |
+| [scripts/report_builder.py](scripts/report_builder.py) | 1 つの計算結果（`results.json`）から、Render UI に写すグラフ（単位ごと）・文字のグラフと表・HTML レポートを作り、3 つの数字の一致・取得不足・単位・単位数・内部識別子を検査する。`build_agent_package.ps1` が include のあるスキルの `scripts/` に同梱する |
+| [scripts/check_connector_ids.py](scripts/check_connector_ids.py) | コネクタ ID が汎用的でないか、手元のほかのプラグイン（`--scan` / `COWORK_PLUGIN_SCAN_DIRS`）と重ならないかを確かめる（Step 6。`build_agent_package.ps1` からも呼ばれる。読み取りのみ） |
+| [scripts/manage_agent_package_graph.py](scripts/manage_agent_package_graph.py) | Graph v1.0 で組織アプリを一覧し、Graph で管理している app package を更新（Step 8 代替） |
+| [scripts/build_cowork_publish_payloads.py](scripts/build_cowork_publish_payloads.py) | `stageCustomApp()` の結果から新規公開（finalize / allow / deploy）または更新（UPDATEAPP）の plan payload を生成（Step 8 / 10） |
+| [scripts/manage_oauth_registration_api.py](scripts/manage_oauth_registration_api.py) | Developer Portal OAuth registration の CRUD（Step 5）。plan → hash 承認 → CLI から送信 → 読み戻し → `.env` に生の ID。重複は事前に止める。`--transport browser` で統合ブラウザ用の plan だけを出す |
+| [scripts/install_agent_package_personal.py](scripts/install_agent_package_personal.py) | 作成者が自分だけにインストール／アンインストールする（Step 8 の前の個人テスト）。ZIP の事前検証 → plan → hash 承認 → launchInfo で照合 |
+| [scripts/rehearse_plugin.py](scripts/rehearse_plugin.py) | 公開前リハーサル。プラグインの SKILL.md と tools 定義を、実際の Dataverse MCP と Azure OpenAI で通しで動かし、会話とツール呼び出しを記録する（専用クライアントの `setup-client` / ツール名の差の `tools` / 依頼から登録までの `run`。既定は書き込みを送らない）（Step 7 の後） |
+| [scripts/get_developer_account.py](scripts/get_developer_account.py) | プラグインの作成者（`developer.name` / `metadata.author`）にする開発中のサインイン アカウントを Graph `/me` で取得。`--write-env` で `COWORK_DEVELOPER_NAME` を書き、`--check-manifest` で manifest と照合（Step 2 / 6） |
+| [../admin/scripts/manage_m365_portal_api.py](../admin/scripts/manage_m365_portal_api.py) | Agent Registry の Finalize / Allow / Install / Update / Permission plan を検証（Step 8 / 10） |
+| [../admin/scripts/m365_portal_browser_runner.mjs](../admin/scripts/m365_portal_browser_runner.mjs) | `stageCustomApp()` で ZIP をステージし、承認済み plan を browser session API で実行して poll と read-back を検証（Step 8 / 10） |
+
+## ワークフロー（正常系）
+
+### Step 0: ヒアリング（プラグイン構想の提案）
+
+ユーザーが「プラグインを作りたい」「Cowork で〜したい」と相談してきたら、**いきなり実装に入らず**
+まず構想を提案する。以下の流れで会話を始める。
+
+1. **目的の確認**: 「Cowork 用のプラグインとして作りますか？ 例えば『〇〇業務を Cowork から
+   Dataverse のデータで支援する』ような形を想定しています」と確認する。
+2. **対象データの把握**: 連携する Dataverse 環境／テーブル（顧客・契約・実績など）をヒアリング。
+   不明なら `describe` / `search` 系で既存テーブルを軽く調べて候補を出す。
+   **Dataverse に無いデータ（基幹 DB・ファイルサーバー・業務 API）が必要なら、この段階で確認する**。
+   必要なら [mcp-server スキル](../mcp-server/SKILL.md) で自前 MCP Server を先に立て、
+   [references/custom-mcp-connector.md](references/custom-mcp-connector.md) でコネクタとして併載する。
+3. **スキル案を5つ提案**: その業務ドメインで Cowork が役立つ**スキルを5つ程度**列挙する。
+   各スキルは「名前（kebab-case）＋一言の用途＋トリガー語の例」をセットで示す。
+
+   例（保守契約ドメインの場合）:
+   | スキル名 | 用途 | トリガー語の例 |
+   |---|---|---|
+   | `annual-customer-review` | 年次レビュー資料作成 | 「年間レビュー資料を作って」 |
+   | `contract-renewal-proposal` | 契約更新提案の下書き | 「更新提案をまとめて」 |
+   | `incident-trend-report` | 障害傾向レポート | 「故障傾向を分析して」 |
+   | `equipment-lifecycle-plan` | 機器更新計画 | 「更新計画を提案して」 |
+   | `cost-optimization-summary` | コスト最適化提案 | 「コスト削減案を出して」 |
+
+4. **プラグイン名を提案**: 5つのスキル群を束ねる**プラグイン名（短縮名 / 正式名）を 2〜3 案**提示する。
+   個社名は避け、業務ドメインが伝わる名前にする（例: 「MFP 年間レビュー」「保守契約アシスタント」）。
+5. **合意**: ユーザーが採用するスキル（1つでも複数でも可）とプラグイン名を選んだら、Step 1 以降に進む。
+
+> **テンプレートから始める**: 営業支援（予定表・メール・チャット → CRM）なら、合意後に
+> [sales-crm-plugin](templates/sales-crm-plugin/README.md) を `scaffold_from_template.py` で生成して Step 1 の `describe` 確認から続ける。
+> Code Apps の [templates/sales-crm](../code-apps/templates/sales-crm/README.md) と同じ Dataverse を共有する。
+
+> 最初は **1スキル + Dataverse MCP コネクタ**の最小構成で公開・疎通確認し、動いたら
+> 残りのスキルを追加する流れが安全（コネクタ認証の検証を先に済ませられる）。
+
+### Step 1: 対象テーブルを `describe` でスキーマ確認（クエリを書く前に必須）
+
+**スキル本文にクエリを書く前に、必ず `describe` で対象テーブルの実スキーマを確認する。**
+テーブル名・列名・**ルックアップ（外部キー）列の正確な名前**を推測で書かない（推測は実行時の
+`Read query Failed` の主因。特に FK 列は環境やクエリ方式で表記が異なる）。
+
+1. 対象テーブルごとに `describe` を実行し、以下を確定する:
+   - **テーブル名**（論理名 / コレクション名のどちらをクエリで使うか）
+   - **列の論理名**（表示名ではなく論理名）
+   - **ルックアップ列の表記**: `describe` の結果に出る実際の列名を使う。
+     `read_query` のクエリ方式に合わせること（Web API/OData 形式の `_xxxid_value` と
+     SQL/論理名 `xxxid` は別物。**describe が返す名前をそのまま使う**）。
+   - **選択肢（Picklist）の値とラベル**の対応
+2. 確認できたスキーマだけを使ってクエリを書く。describe に無い列・テーブルは使わない。
+3. スキル本文の冒頭にも「Step 1: 対象テーブルを `describe` で確認してからクエリする」を入れ、
+   **生成するスキル自身も実行時に describe で裏取りする**手順にする（下のテンプレート参照）。
+
+> 確認結果は「対象データ（テーブル）」表に**論理名で**まとめる。表示名は補足に留める。
+
+### Step 2: スキル（SKILL.md）を作る
+
+`skills/<skill-name>/SKILL.md` を作成。**フォルダ名と frontmatter `name` を完全一致**させ、
+`name` は kebab-case（小文字英数とハイフン、連続/先頭/末尾ハイフン禁止）。
+
+```yaml
+---
+name: annual-customer-review
+description: |
+  <何をするスキルか>。Use when ユーザーが「<トリガー語1>」「<トリガー語2>」と依頼したとき。
+  Dataverse MCP コネクタ（read_query / search_data / search / describe）を使用する。
+license: MIT
+metadata:
+  author: <作成者>   # 開発中のサインイン アカウントの表示名（manifest の developer.name と同じ値）
+  version: "1.0"
+---
+```
+
+> **作成者は開発中のサインイン アカウントにする**。`python .github/skills/cowork/scripts/get_developer_account.py` が
+> auth_helper のキャッシュで Graph の `/me` を読み、表示名（`developerName`。manifest の上限 32 文字に切り詰め）を返す。
+> この値を `COWORK_DEVELOPER_NAME` として manifest の `developer.name` と各スキルの `metadata.author` に入れる
+> （テンプレートでは質問の `detect` で既定値になる）。会社名・固定の文字列を入れない。
+
+本文は **ワークフロー**として書く（番号付き手順／使用ツール名を明示／出力フォーマットを定義）。
+本文は約 1,500〜2,000 語以内。詳細は `references/` に逃がす（コンパニオンファイルは最大20・各5MB）。
+
+> **生成するスキル本文の必須ルール**: ワークフローの最初の Step を
+> 「対象テーブルを `describe` でスキーマ確認（列名・FK 列名を確定）」とする。
+> クエリ例の列名は describe で確認済みのものだけを使い、未確認の列を推測で書かない。
+
+**結果の見せ方（提案するスキルは標準で Render UI のグラフ）**: 提案・助言・打ち手・対策案を出すスキルと、数字を扱うスキル（集計・点検・登録の確認）は、
+答えを **チャットのグラフ（Render UI）・表・保存用の HTML レポート** で返す。スキルに書くのは 3 つだけ:
+① 必須ルールの後に `<!-- include: display-rules.md -->`（ビルドで共通ルール [display-rules.md](references/display-rules.md) に置き換わり、
+`scripts/` に [report_builder.py](scripts/report_builder.py) とひな形が入る）、② 「このスキルのグラフ」の節（図の題名・種類 `stacked_hbar` / `grouped_bar`・元の表・単位）、
+③ 図の位置 `〔Render UI の図: …〕` と `📄 レポート: <ファイル名>.html` を入れた回答のひな形と、「このスキルの確認（返す前・毎回）」。
+グラフ・表・HTML は `report_builder.py` が 1 つの計算結果（`results.json`）から作り、取得不足・単位の混在・内部識別子・3 つの数字の不一致を止める。
+Render UI の仕様と正式な色は公開されていないため、実行時に Render UI の説明を読んで使い、表示を確かめるまで成功と書かず、1 回直して駄目なら文字のグラフに切り替える。
+書き方の例・`results.json` の形は [references/visual-output.md](references/visual-output.md)。`build_agent_package.ps1` が `check_visual_output.py` で毎回検査し、提案するスキルに手順が無ければ止める（#52・#53）。
+
+### Step 3: Entra アプリ（OAuth クライアント）を作成・構成
+
+Dataverse MCP は Microsoft ファーストパーティ API のため、トークンの **audience が Dataverse 自身**
+（`https://<org>.crm.dynamics.com`）である必要がある。**SSO 方式は audience が「自前アプリ」になり失敗する**
+（→ troubleshooting #14）。そのため **OAuth 2.0 認可コードフロー**を使い、Enterprise Token Store に
+Dataverse 宛のトークンを直接取得させる。**クライアントシークレットが必要**。値は `.env` に保存する。
+
+**再利用スクリプト（推奨）**: [scripts/setup_entra_oauth_graph.py](scripts/setup_entra_oauth_graph.py) が
+Microsoft Graph API 経由でアプリ登録・`mcp.tools` 権限付与・シークレット作成・`.env` 書き込みを一括で行う。
+**standard の auth_helper.py が共有する認証キャッシュを利用**するため、az CLI で別途サインインする必要がない。
+
+```powershell
+# auth_helper.py のキャッシュ済みトークンで Graph API を呼ぶ
+python .github/skills/cowork/scripts/setup_entra_oauth_graph.py
+# 例: python .github/skills/cowork/scripts/setup_entra_oauth_graph.py --display-name "MyApp-Cowork-OAuth" --secret-years 1
+```
+
+> **自前 MCP Server を使う場合**は付与する権限が違う（Dynamics CRM の `mcp.tools` ではなく
+> 自前 API の公開スコープ）。`--api-audience` を指定する。
+>
+> ```powershell
+> python .github/skills/cowork/scripts/setup_entra_oauth_graph.py --api-audience "api://<api-app-id>" --api-scope MCP.Access
+> ```
+>
+> 併用するなら `--include-dataverse` を足す。詳細は [custom-mcp-connector.md](references/custom-mcp-connector.md)。
+
+**代替（az CLI 版）**: [scripts/setup_entra_oauth.ps1](scripts/setup_entra_oauth.ps1)。共通 `auth_helper` のキャッシュを使わず、az CLI のブラウザーサインインと独立した資格情報キャッシュを利用する:
+
+```powershell
+./.github/skills/cowork/scripts/setup_entra_oauth.ps1 -DisplayName "Contoso-Cowork-OAuth"
+```
+
+az CLI で手動で行う場合の同等コマンド:
+
+```powershell
+$env:PATH = "C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin;$env:PATH"
+az login --tenant <TENANT_ID> --allow-no-subscriptions --only-show-errors
+
+# 1. アプリ登録（リダイレクト URI は固定値2つ）
+$appId = az ad app create --display-name "Cowork-DataverseMCP-OAuth" `
+  --web-redirect-uris `
+    "https://teams.microsoft.com/api/platform/v1.0/oAuthRedirect" `
+    "https://teams.microsoft.com/api/platform/v1.0/oAuthConsentRedirect" `
+  --sign-in-audience AzureADMyOrg --query appId -o tsv
+
+# 2. Dynamics CRM の委任権限 mcp.tools を付与（Dataverse MCP 専用スコープ）
+az ad app permission add --id $appId `
+  --api 00000007-0000-0000-c000-000000000000 `
+  --api-permissions a4c5bee6-25ff-4bb5-b926-b7eb8062ae7a=Scope --only-show-errors
+
+# 3. クライアントシークレットを作成（OAuth 認可コードフローに必須）→ .env に保存
+$secret = az ad app credential reset --id $appId --display-name "cowork-oauth" `
+  --years 2 --query password -o tsv
+# .env の COWORK_OAUTH_CLIENT_ID / COWORK_OAUTH_CLIENT_SECRET に書き込む（Git にコミットしない）
+(Get-Content .env) `
+  -replace '^COWORK_OAUTH_CLIENT_ID=.*', "COWORK_OAUTH_CLIENT_ID=$appId" `
+  -replace '^COWORK_OAUTH_CLIENT_SECRET=.*', "COWORK_OAUTH_CLIENT_SECRET=$secret" |
+  Set-Content .env
+```
+
+> ポイント:
+> - SSO と違い `Expose an API`（スコープ公開）も `preAuthorizedApplications` 事前承認も**不要**。
+>   認可コードフローは Dynamics CRM の委任スコープ `mcp.tools` を直接同意するため。
+> - API 権限は **`mcp.tools` のみ**でよい（`user_impersonation` は不要）。OAuth registration の scope を
+>   `.default` にすることで、このアプリに静的設定された `mcp.tools` が要求される。
+> - **シークレットは機密**。`.env` は `.gitignore` で除外する。スキルや manifest には絶対に書かない。
+
+> **テナント管理者の事前同意（admin consent）が必要な場合がある**: テナントがユーザーの自己同意
+> （user consent）を制限していると、`mcp.tools` への同意は Cowork 初回利用時にサイレントに失敗する
+> （エラー表示なしで「コネクタが反応しない」ように見える → troubleshooting #22）。
+> `setup_entra_oauth_graph.py` はアプリ登録後にサービスプリンシパルの作成と admin consent の状態を
+> 自動確認し、未完了なら `https://login.microsoftonline.com/<TENANT_ID>/adminconsent?client_id=<appId>`
+> の形式で URL を表示する。開発者自身がテナント管理者でなければ、この URL をテナント管理者に共有し、
+> 同意を得てから Step 4 以降に進む。
+
+### Step 4: Entra Client ID を許可 MCP クライアントに登録（必須）
+
+> **自前 MCP Server のみを使う場合はこの Step をスキップする**（Dataverse を経由しないため）。
+> 代わりに MCP Server 側の API アプリで Cowork の Client ID を事前承認する
+> → [custom-mcp-connector.md](references/custom-mcp-connector.md)。
+
+OAuth 認可コードフローでは Dataverse に提示されるトークンの **appid がこのカスタムアプリ**になる。
+そのため、**Entra の Client ID を `allowedmcpclients` テーブルに登録・有効化**しないと、認証は通っても
+データ取得時に失敗する（ブログでも「抜けると plugin は正常に見えても Dataverse 利用時に失敗」と強調）。
+
+**再利用スクリプト（推奨）**: [scripts/register_mcp_client.py](scripts/register_mcp_client.py)（汎用・どのテナントでも可）。
+
+```powershell
+# .env の COWORK_OAUTH_CLIENT_ID を登録（未登録なら作成、既存なら有効化）
+python .github/skills/cowork/scripts/register_mcp_client.py
+
+# 状態確認のみ（副作用なし）
+python .github/skills/cowork/scripts/register_mcp_client.py --check
+# 一覧
+python .github/skills/cowork/scripts/register_mcp_client.py --list
+# app id を明示
+python .github/skills/cowork/scripts/register_mcp_client.py --app-id <CLIENT_ID> --name "Cowork Dataverse MCP"
+```
+
+> uniquename 未指定時は `<PUBLISHER_PREFIX>_<name のスラッグ>` で生成される。
+> GUI なら Power Platform 管理センター → 環境 → 設定 → 機能 →
+> Dataverse MCP の詳細設定（`etn=allowedmcpclient`）で +New。
+
+> **Step 5 に進む前に一括診断する（推奨）**: Teams 開発者ポータル登録や zip 再アップロードは
+> 手戻りのコストが高いブラウザ操作なので、その前に3層（アプリ登録・admin consent・
+> allowedmcpclients）が揃っているかを1コマンドで確認しておく。
+> ```powershell
+> python .github/skills/cowork/scripts/diagnose_cowork_connector.py
+> ```
+> いずれかのレイヤーが ❌/❓ の場合は、表示される対処コマンドを実行してから Step 5 に進む。
+
+### Step 5: OAuth client registration API → registrationId 取得
+
+正常系は Developer Portal private API の CRUD を **CLI から直接**送る。`auth_helper` で Microsoft 365 Agents Toolkit の
+公開クライアント（Developer Portal が事前承認済み）のトークンを取り、`/api/v1.0/oauthConfigurations` を呼ぶ。
+初回だけ Device Code のサインインが要り、以後はキャッシュで無操作になる。同じ clientId・Base URL の登録が既にあれば止まり、
+作成後は読み戻して plan と一致するかを確かめ、**生の registration ID** を `.env` に書く（画面には末尾だけ出す）。
+手順と endpoint は [portal-api-automation.md](references/portal-api-automation.md)を参照。
+
+```powershell
+python .github/skills/cowork/scripts/manage_oauth_registration_api.py create `
+  --name "Dataverse MCP OAuth (<plugin>)" --base-url $env:DATAVERSE_URL `
+  --scopes "$env:DATAVERSE_URL/.default,offline_access"
+# 承認後、同じ引数に --write-env .env --expected-hash <APPROVED_HASH> --apply
+```
+
+CLI のトークンが取れない（Device Code が条件付きアクセスで禁止など）場合は `--transport browser` で plan を出し、
+ログイン済み VS Code 統合ブラウザから送る。API が `401` / `403` / `404`、または観測済み schema と一致しない場合だけフォーム操作へ切り替える。
+[ブラウザ自動化方針](../standard/references/browser-automation.md)に従い、使用する Edge プロファイルを確認する。
+
+[dev.teams.microsoft.com/tools](https://dev.teams.microsoft.com/tools) → Tools →
+**OAuth client registration** → New（**SSO client registration ではない**）。
+
+| フィールド | 値 |
+|---|---|
+| Registration name | `Dataverse MCP OAuth (<org>)` |
+| Base URL | `https://<org>.crm.dynamics.com`（**`/api/mcp` は付けない**。MCP URL は manifest 側に書く） |
+| Client ID | `.env` の `COWORK_OAUTH_CLIENT_ID` |
+| Client secret | `.env` の `COWORK_OAUTH_CLIENT_SECRET`（**画面に直接貼る／質問ツール禁止**） |
+| Authorization endpoint | `https://login.microsoftonline.com/<TENANT_ID>/oauth2/v2.0/authorize` |
+| Token endpoint | `https://login.microsoftonline.com/<TENANT_ID>/oauth2/v2.0/token` |
+| Refresh endpoint | `https://login.microsoftonline.com/<TENANT_ID>/oauth2/v2.0/token` |
+| Scope | `https://<org>.crm.dynamics.com/.default,offline_access`（**カンマ区切り**。UI のヘルプ文言が
+  「separated by a comma」のため半角スペース区切りでは受け付けない環境がある。`.default` で静的権限＝
+  `mcp.tools`、`offline_access` でリフレッシュトークン） |
+| Enable PKCE | 有効（推奨） |
+| Restrict usage by org | `My organization only`（単一テナント）／`Any Microsoft 365 Organization`（複数テナント配布時） |
+| Restrict usage by app | `Any Teams app`（**ストア検証が通るまではこちら**。公開・疎通確認後に Existing Teams app へ切替可） |
+
+Save すると **OAuth client registration ID** が発行される。これを **生の値のまま**（Base64 変換せず）
+`.env` の `COWORK_OAUTH_REGISTRATION_ID` に保存する。
+
+> **自前 MCP Server の場合**は Base URL を `https://<app>.azurewebsites.net`、Scope を
+> `api://<api-app-id>/.default,offline_access` に差し替える
+> → [custom-mcp-connector.md](references/custom-mcp-connector.md)。
+
+> **referenceId の値**: OAuth 方式でも SSO 方式と同じく
+> `Base64("<tenantId>##<registrationId>")` 形式が必要（実機検証で確認済み。→ troubleshooting.md #23）。
+> `.env` には生の registration ID を保存し、Base64 エンコードは Step 7 の
+> `build_agent_package.ps1` が自動で行う（手動でエンコードして `.env` に入れない）。
+
+
+### Step 6: manifest.json を作成
+
+```jsonc
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.29/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.29",
+  "version": "1.0.0",
+  "id": "<決定的GUID: uuid5 から生成>",
+  "developer": { "name": "...", "websiteUrl": "...", "privacyUrl": "...", "termsOfUseUrl": "..." },
+  "name": { "short": "...", "full": "..." },
+  "description": { "short": "...", "full": "..." },
+  "icons": { "color": "color.png", "outline": "outline.png" },
+  "accentColor": "#D5001C",
+  "agentSkills": [ { "folder": "./skills/<skill-name>" } ],
+  "agentConnectors": [
+    {
+      "id": "<plugin-slug>-dataverse-mcp",
+      "displayName": "<プラグイン名> Dataverse MCP",
+      "description": "Dataverse のテーブル/レコードへ MCP 経由でアクセス。",
+      "toolSource": {
+        "remoteMcpServer": {
+          "mcpServerUrl": "https://<org>.crm.dynamics.com/api/mcp",
+          "authorization": {
+            "type": "OAuthPluginVault",
+            "referenceId": "__COWORK_OAUTH_REGISTRATION_ID__"
+          }
+        }
+      }
+    }
+  ]
+}
+```
+
+- **`developer.name` は開発中のサインイン アカウントの表示名**（Step 2 の `metadata.author` と同じ値。32 文字まで）。
+  ビルド前に `get_developer_account.py --check-manifest <plugin-root>/manifest.json` で一致を確かめる。
+- **コネクタの `id` はテナント内の全プラグインで一意にする**（`<プラグインの kebab 名>-<データ源>-mcp`。例 `sales-crm-dataverse-mcp`）。
+  Cowork は同じコネクタ ID を持つプラグインを 1 つしか有効にできず、2 つ目を有効にすると「コネクタの競合
+  "dataverse-mcp" を指定できるプラグインは 1 つだけです」と表示され、どちらかを無効にするまで MCP が使えない
+  （→ troubleshooting #50）。テナントのプラグインのコネクタ ID は API で一覧できないので、**汎用的な ID（`dataverse-mcp` など）を
+  使わない**ことで衝突を防ぎ、手元のプラグインとは次で突き合わせる（`build_agent_package.ps1` も汎用 ID を止め、
+  `COWORK_PLUGIN_SCAN_DIRS` があれば同じ突き合わせを行う）。`displayName` もプラグイン名を入れて見分けられるようにする。
+
+  ```powershell
+  python .github/skills/cowork/scripts/check_connector_ids.py --manifest <plugin-root>/manifest.json --scan <ほかのプラグインの置き場所>
+  ```
+
+  既に公開済みのプラグインの ID を変えた版を出すと、利用者は Cowork でコネクタを Connect し直す（初回同意）。
+- **`referenceId` はプレースホルダー `__COWORK_OAUTH_REGISTRATION_ID__` のまま source に残す**（Step 5 の
+  実 registration ID を直接コミットしない）。実値は `.env` の `COWORK_OAUTH_REGISTRATION_ID` に置き、
+  Step 7 のビルドスクリプトが zip 生成時に注入する。
+- **`agentConnectors` は複数書ける**。Dataverse MCP と自前 MCP Server（`https://<app>.azurewebsites.net/api/mcp`）を
+  併載できる。その場合は各 `description` に **どのコネクタをどの用途で使うか**を明記する
+  （エージェントはこの説明でツールを選ぶため）→ [custom-mcp-connector.md](references/custom-mcp-connector.md)。
+- `id` は `python -c "import uuid; print(uuid.uuid5(uuid.NAMESPACE_URL, '<安定URL>'))"` で決定的に生成。
+- **manifest は 1.29 にし、`mcpToolDescription` を書かない（動的ツール検出）**。1.29 では `mcpToolDescription` が任意になり、
+  省略すると Cowork が実行時に MCP サーバーの `tools/list` でツールを取得する（`wiqd plugin create` も 1.29 を生成する）。
+  1.28 の固定ツール定義では、アップロード・Connect は成功するのに Cowork の実行時にツールが 0 件になる事例があった
+  （→ troubleshooting #46）。
+  - 動的検出では、サーバーの**全ツール**（`delete_record`・`create_table`・`delete_table` など）が Cowork に見える。
+    各スキルの必須ルールに「使うツール」と「呼ばないツール」を明記し、Dataverse 側は利用者のセキュリティ ロールで
+    書き込み・削除を絞る（[permissions.md](references/permissions.md)）。
+  - スキルの最初の Step に「`describe` が使えなければ止めて報告する（別の手段で探さない）」を入れる。
+  - スキルが挙げたツール名がサーバーにあるかは `rehearse_plugin.py tools`（動的モード）で確かめる。
+
+  **固定ツール定義（1.28 または 1.29 で絞りたい場合）**: 値は **オブジェクト `{ "file": "<相対パス>" }`**（文字列不可。
+  スキーマ上 `description` で包む形ではない）。参照先は **JSON 形式の tools 定義**でなければ
+  `is invalid or not found in manifest package` になる（`.md` は invalid）。1.28 では省略不可。
+  ビルドスクリプトは manifest が参照するファイルだけを同梱する。
+
+  `dataverse-mcp-tools.json`（固定にする場合だけ。パッケージルートに配置）:
+  ```json
+  {
+    "tools": [
+      { "name": "read_query", "description": "FetchXML クエリでレコード取得。",
+        "annotations": { "readOnlyHint": true, "title": "Read Query" } },
+      { "name": "search_data", "description": "テーブル内を条件検索。",
+        "annotations": { "readOnlyHint": true, "title": "Search Data" } },
+      { "name": "search", "description": "Dataverse 全体を横断検索。",
+        "annotations": { "readOnlyHint": true, "title": "Search" } },
+      { "name": "describe", "description": "テーブル/列のメタデータを取得。",
+        "annotations": { "readOnlyHint": true, "title": "Describe" } }
+    ]
+  }
+  ```
+
+  > **ツール名は Dataverse MCP 側の変更に追従させる**（廃止された `describe_table`/`list_tables`/`fetch` や
+  > 旧 `search`（データ検索の意味）をそのまま書かない。現在の正しいツール名一覧は
+  > [standard/references/dataverse-mcp-setup.md](../standard/references/dataverse-mcp-setup.md#主な-mcpツール) を参照）。
+  > 古いツール名のまま公開すると、Cowork 側で該当ツールが認識されずスキルが動作しない（→ troubleshooting #15）。
+  > 上記の例は**読み取り専用の4ツールのみ**。スキルが `create_record`/`update_record`/`delete_record`/
+  > `upsert_skill` 等の**書き込み系ツールを呼ぶ場合は、そのツール名もここに追加する**こと。
+  > 追加を忘れると、読み取りは動くのに書き込み操作だけ「反応しない」原因不明の部分故障になる
+  > （→ troubleshooting #15 の補足）。
+  > 書き込み系の引数は `create_record(tablename, item)` / `update_record(tablename, recordId, item)`。
+  > Lookup は `@odata.bind` ではなく、Lookup 列の論理名に `{"relatedTable":"<テーブル>","recordId":"<GUID>"}` を
+  > 文字列化した JSON で渡す。スキル本文にもこの形式を明記する（→ troubleshooting #29）。
+- **アイコンはドメイン文脈を読んでから設計する**（→ [standard/references/icon-creation.md](../standard/references/icon-creation.md)
+  の「アイコン画像提案フロー」）。`generate_icon_png.py` の汎用スパークルをそのまま登録しない。
+  この manifest の `name`/`description`（プラグインの業務目的）と `accentColor` からモチーフ・配色を決め、
+  プラグイン専用の `draw_<theme>_icon()` を実装してから `color.png`（192×192）/ `outline.png`（32×32,
+  白い透明背景）を生成する。
+
+### Step 7: パッケージ（.zip）をビルド
+
+**manifest.json をルートに**置いて圧縮する（フォルダごと圧縮しない）。`mcpToolDescription` を書いた場合だけ、そのツール説明 JSON も含める。
+**`.env` から `COWORK_OAUTH_REGISTRATION_ID` を読み `__COWORK_OAUTH_REGISTRATION_ID__` に注入**してから zip 化する
+（手作業で referenceId を manifest に直接埋めない＝取り違え・コミット事故を防ぐ）。
+
+**再利用スクリプト（推奨）**: [scripts/build_agent_package.ps1](scripts/build_agent_package.ps1)。
+`.env` の値が `'...'`／`"..."` で囲まれていても**引用符を自動で取り除いて**から注入する
+（引用符付きのまま注入すると `referenceId` が壊れ、Cowork 初回同意時にコネクタ認証が失敗する）。
+
+```powershell
+pwsh .github/skills/cowork/scripts/build_agent_package.ps1 -PluginRoot <plugin-root> -OutputName <name>
+```
+
+手動で行う場合の同等コマンド（quote-stripping を忘れないこと）:
+
+```powershell
+$regId = (Get-Content .env | Select-String '^COWORK_OAUTH_REGISTRATION_ID=').ToString().Split('=',2)[1].Trim("'", '"')
+(Get-Content manifest.json -Raw) -replace '__COWORK_OAUTH_REGISTRATION_ID__', $regId | Set-Content manifest.built.json
+Compress-Archive -Path manifest.built.json, color.png, outline.png, skills `
+  -DestinationPath dist/<name>.zip -Force   # 固定ツール定義なら dataverse-mcp-tools.json も加える
+```
+
+ZIP 検証: ルートに `manifest.json`（build 後、プレースホルダーが実 ID に置換済み）、
+`skills/<skill-name>/SKILL.md` が含まれること（固定ツール定義なら参照先 JSON も）。
+
+#### 公開前リハーサル（Step 7 の最後）
+
+Step 7 でビルドしたら、**公開する前に**スキルを実データで通しで動かす。Cowork の画面と違い、何度でも同じ依頼で試せ、会話・ツール呼び出しが残る。
+初回だけ専用の公開クライアントを作る（Cowork 本体のアプリとは別。mcp.tools の管理者同意と allowedmcpclients 登録まで行う）。
+
+```powershell
+python .github/skills/cowork/scripts/rehearse_plugin.py setup-client --name "<Plugin>-Rehearsal" --apply   # 初回だけ
+python .github/skills/cowork/scripts/rehearse_plugin.py tools --plugin-root <plugin-root>                 # ツール名の差
+# 依頼 → 提示 → 利用者の返事 → 登録。まず書き込みなしで、よければ --allow-write
+python .github/skills/cowork/scripts/rehearse_plugin.py run --plugin-root <plugin-root> --skill <skill> `
+  --prompt "<依頼>" --reply "<確認の返事>" --transcript spec/eval/cowork-rehearsal/<skill>.md
+```
+
+見るところ: 検索が 0 件で止まっていないか（`search_data` に頼らず `read_query` の LIKE）、提示してから登録しているか、
+承認済みの行を変えていないか、承認件数どおり登録したか、値（分類など）が既存と揃っているか、数値が根拠にあるか、
+JSON などの文字列が壊れていないか（[troubleshooting #38〜#45](references/troubleshooting.md)）。直したら版を上げてビルドし直す。
+
+### Step 8: 管理センター private API で新規登録・公開する
+
+> **組織への公開の前に、作成者が自分だけにインストールして確かめる**（管理者ロール不要・CLI だけで完結）。
+> `atk install --scope Personal` と同じ M365 Title サービスの API を、Step 5 と同じ Agents Toolkit クライアントで呼ぶ。
+> ZIP の事前検証（プレースホルダー残り・manifest の位置）→ plan → hash 承認 → upload → acquire → poll →
+> `launchInfo` でスキル数・コネクタ数・`blockStatus` を照合する。
+>
+> ```powershell
+> python .github/skills/cowork/scripts/install_agent_package_personal.py install --package <zip>
+> # 承認後、同じ引数に --expected-hash <APPROVED_HASH> --apply。外すときは uninstall --title-id <titleId>
+> ```
+
+**private API を正常系にする**（UI ウィザードと同じ request を、ログイン済み VS Code 統合ブラウザの同一 session から送る）。
+Graph の `appCatalogs/teamsApps` は `agentSkills` / `agentConnectors` を持つパッケージを成功応答のまま破棄することがある
+（troubleshooting #26）ため、新規登録には使わない。契約の詳細は [admin の M365 テナント管理 API](../admin/references/m365-tenant-api.md)。
+
+| # | 処理 | request | plan operation |
+|---|---|---|---|
+| 1 | ZIP を検証・ステージ | `POST /fd/addins/api/apps/uploadCustomApp?workloads=MetaOS`（multipart, `ActionType=DEPLOY`） | runner の `stageCustomApp()` |
+| 2 | パッケージ確定 | `POST /fd/addins/api/v2/actionableApps`（`FINALIZEPACKAGE` + `MosOperationId`） | `agent-publish` |
+| 3 | インストールできる利用者 | `POST /fd/addins/api/availableAgents`（`ALLOW`, `Workload=SharedAgent`） | `agent-allow` |
+| 4 | 事前インストール（任意） | `POST /fd/addins/api/apps`（`DEPLOY` + `MosOperationId`） | `agent-lifecycle` |
+
+1. 統合ブラウザで `https://admin.cloud.microsoft/#/agents/tools/all` を開き（サインインはユーザーが行う）、
+   `stageCustomApp(page, { zipPath: "<zip の絶対パス>", actionType: "DEPLOY" })` を実行する。
+   戻り値（`titleId` / `mosOperationId` / `currentVersion`）を `stage.json` に保存する。
+   「already been deployed」は同じ manifest ID が登録済みの合図なので Step 10 の更新へ進む。
+2. payload を生成し、各 plan を dry-run して PLAN_HASH をユーザーに提示する。
+
+   ```powershell
+   python .github/skills/cowork/scripts/build_cowork_publish_payloads.py --mode new `
+     --stage-file stage.json --publish-to <ユーザーのオブジェクトID> --install-to <ユーザーのオブジェクトID> `
+     --out-dir publish-plan
+   python .github/skills/admin/scripts/manage_m365_portal_api.py agent-publish   --payload-file publish-plan/1-finalize.json
+   python .github/skills/admin/scripts/manage_m365_portal_api.py agent-allow     --payload-file publish-plan/2-allow.json
+   python .github/skills/admin/scripts/manage_m365_portal_api.py agent-lifecycle --payload-file publish-plan/3-deploy.json
+   ```
+
+3. 承認後、各 plan を `--expected-hash <PLAN_HASH> --apply` で `READY_FOR_BROWSER_API` にし、
+   `m365_portal_browser_runner.mjs` の `runApprovedPlan()` で **1 → 2 → 3 の順に 1 件ずつ**送る。
+   各 request の `appManagementRequestID` を poll し、`appsManagementStatus[].status` が `Success` になってから次へ進む。
+4. 読み戻し: 管理センター **Agents → Tools → Plugins** に表示され、Cowork の **Customize → Plugins** に届くことを確認する
+   （Cowork への反映は数分かかる。Cowork プラグインは All agents（Registry）には出ない）。
+
+> 公開対象は最初は検証ユーザー（またはセキュリティ グループ）だけにする。`build_cowork_publish_payloads.py` は
+> 全員公開の payload を作らない。`SendEmailToUsers` は常に `false`。
+
+#### Graph で管理しているプラグイン（代替）
+
+既に Graph の組織カタログで登録・読み戻しできているプラグイン（`manage_agent_package_graph.py list` に出るもの）は、
+同じスクリプトで更新できる。詳細は [portal-api-automation.md](references/portal-api-automation.md)。
+
+```powershell
+# dry-run。package SHA-256 を含む PLAN_HASH を確認する
+python .github/skills/cowork/scripts/manage_agent_package_graph.py deploy `
+  --package <name>.zip --requires-review
+
+# 承認した同一 package だけを登録/更新する
+python .github/skills/cowork/scripts/manage_agent_package_graph.py deploy `
+  --package <name>.zip --requires-review --expected-hash <APPROVED_HASH> --apply
+```
+
+> **403（`AppCatalog.*` スコープなし）の場合は `--graph-powershell` を付ける**（`deploy` / `list` の前に置く）。
+> 既定の認証クライアントには `AppCatalog.ReadWrite.All` の委任が無いため、Microsoft Graph PowerShell の
+> 公開クライアントでこのスコープだけを要求する（`auth_helper` のキャッシュを client_id 別に再利用）。
+
+API が401/403/404、schema不一致、read-back不一致の場合だけ、次の管理センターfallbackを選択する。
+
+#### 管理センター fallback
+
+> ⚠️ Cowork プラグインは**「統合アプリ」ではなく、新しい「エージェント」画面**からアップロードする（UI 変更済み）。
+
+> **ブラウザ自動化で実施する場合の既知の落とし穴**（詳細は troubleshooting #18-20）。事前に把握してから進めると手戻りがない。
+> ブラウザ操作は **VS Code 統合 Playwright ブラウザ**（`playwright-browser_navigate` / `playwright-browser_click` / `playwright-browser_handle_dialog` 等）を使う
+> （Playwright MCP サーバー・Playwright 単体ブラウザは使わない → [ブラウザ自動化方針](../standard/references/browser-automation.md)）。
+> 1. Teams 開発者ポータル → 管理センターへの遷移で **SSO 自動サインインが「Trying to sign you in」で止まる**ことがある。数秒進まなければアカウントピッカーを探してクリックする。
+> 2. **「Choose file」は OS ネイティブのファイル選択ダイアログ**を開くため、通常の `playwright-browser_click` では選択できない。
+>    ウィザード内の `input[type=file]` に `setInputFiles('<zip の絶対パス>')` を直接設定するのが最も確実（ダイアログ不要）。
+>    ボタンを押す場合はクリック後に **`playwright-browser_handle_dialog`** の `paths` にローカルの `.zip` の絶対パスを渡す。
+> 3. **Publish to users / Install のラジオボタン**は `<label>` が pointer-events を奪っていることがあり、`input` への直接クリックはタイムアウトする。`label[for=<id>]` をクリックする。
+> 4. 統合ブラウザのタブが非表示だと `click` が「visible, enabled and stable」待ちでタイムアウトする。
+>    `locator.evaluate(el => el.click())` で DOM クリックする（troubleshooting #27）。
+
+1. [Microsoft 365 管理センター](https://admin.cloud.microsoft/) → 左ナビ **エージェント（Agents）** (`#/agents/all`)
+2. **Registry** タブ → ツールバー右の **More actions（…、Export の隣）** → **Add agent** → **Upload agent** ウィザード起動
+3. **Upload**: `<name>.zip` を選択→manifest 検証が走る（エラーが出たら troubleshooting 参照）
+4. **Publish to users**: 公開対象（All users / 特定ユーザー）と Install（None 推奨）を選択
+5. **Apply template**（Default で Next）→ **Accept permissions**（権限不要なら「No required permissions」）→ **Review & finish** → **Publish**
+6. 「You uploaded <name>」表示で完了 → **Close**。詳細パネルの Status が **Available** になる
+   （Cowork プラグインは Registry 一覧・`/fd/addins/api/agents` には出ない。登録確認は **Agents → Tools → Plugins** で行う）
+7. Cowork（`https://m365.cloud.microsoft/cowork` → **Customize → Plugins**）の Installed にプラグインが表示される。
+   トグルを ON にすると **Connect** ボタンに変わるので、**ユーザー自身がクリック**して Dataverse MCP の OAuth 接続を完了する
+   （自動クリックで開いた OAuth ポップアップはブラウザにブロックされる。troubleshooting #28）
+
+> アップロード検証でエラーバーが出たら、同じファイルを再選択しても再検証されない。
+> エラーバーを閉じてから zip を選び直すこと。
+
+### Step 9: Cowork で利用・初回同意
+
+1. Cowork の **Customize → Plugins** でプラグインを有効にし、スキルのトリガー語（例: 「年間レビュー資料を作って」）を入力
+2. 初回は Dataverse MCP コネクタの **OAuth 同意**が走る（Enterprise Token Store 経由）
+3. 同意後、`read_query` 等が実行されデータ取得 → 資料生成
+4. **新しいタスクで `describe` が実際に呼ばれることを確かめる**。詳細画面の「接続済み」表示だけでは、実行時にツールが使える証明にならない。
+   ツールが 0 件なら `check_oauth_signins.py` で切り分け、トークン発行がすべて成功していれば Cowork 側の問題として扱い
+   （troubleshooting #46）、同じスキルを Copilot Studio のエージェントで動かす
+   （[copilot-studio-v2 の agm-qa-author](../copilot-studio-v2/templates/agm-qa-author/README.md) が例）。
+
+### Step 10: プラグインの更新（再公開）
+
+スキル本文・manifest・アイコン等を変更したら、**同じ `id` のまま再公開**する。
+更新経路は**最初に登録した経路で決まる**（troubleshooting #30）。
+
+1. manifest.json の **`version` をインクリメント**（例: `1.0.2` → `1.0.3`）。`id` は変更しない。
+2. zip を再ビルド（Step 7 と同じ。`dataverse-mcp-tools.json` も忘れず含める）。
+3. `manage_agent_package_graph.py list` に対象の manifest ID が**あれば** Step 8 の `deploy` で更新する
+   （Graph の `appDefinitions` 更新。実績あり）。
+4. Graph に**無い**（管理センターのウィザードで登録した）場合、Add agent / Tools → Upload は
+   「The agent (tool) you are uploading has already been deployed.」で拒否される。**private API で更新する**
+   （Uninstall 不要。公開対象・利用者の Connect を維持する）。
+   1. ログイン済み管理センターの同一 session で `stageCustomApp(page, { zipPath, actionType: "UPDATEAPP", productId: "<titleId>" })` を実行し、
+      `latestVersion`（新版）と `mosOperationId` を `stage.json` に保存する（titleId は Tools 詳細 URL の `T_...`）。
+   2. `build_cowork_publish_payloads.py --mode update --stage-file stage.json --out-dir update-plan` で payload を作り、
+      admin の `manage_m365_portal_api.py agent-update-app --payload-file update-plan/1-update-app.json` で dry-run → PLAN_HASH 承認 →
+      `--expected-hash ... --apply` → `m365_portal_browser_runner.mjs` で送信し、`appsManagementStatus[].status=Success` を確認する。
+   3. Cowork の Customize → Plugins → 対象の Details で Version を読み戻す。
+   契約の詳細は [admin の M365 テナント管理 API](../admin/references/m365-tenant-api.md)。
+   private API が使えない場合だけ、Agents → **Tools → Plugins** で **Uninstall** → **Tools → Upload** で登録し直す
+   （利用者は有効化と Connect をやり直す）。
+
+> 注意:
+> - Cowork プラグインは Agents → All agents（Registry）の一覧には表示されない。状態・Version・Uninstall / Block は
+>   **Agents → Tools → Plugins** の詳細パネルで確認・操作する。
+> - `id` を変えると別プラグイン扱いになり、既存の公開設定・同意が引き継がれない。
+> - 継続的に更新するプラグインは、Graph で登録して読み戻せたものを正とする（更新も Graph で完結する）。
+> - 詳細パネルの Version / 説明文表示はテナント側キャッシュで反映が数分遅れることがある。
+> - **公開対象はウィザードで毎回選択**する（前回設定は自動継承されない）。
+
+## 検証チェックリスト
+
+- [ ] `check_mcp_client.py cowork` が ✅
+- [ ] **対象テーブルを `describe` で確認**し、テーブル名・列名・**FK 列名**を確定（推測でクエリを書かない）
+- [ ] 生成したスキル本文の最初の Step が「`describe` でスキーマ確認」になっている
+- [ ] フォルダ名 = SKILL.md `name`（kebab-case）
+- [ ] 作成者（manifest の `developer.name` と各スキルの `metadata.author`）が開発中のサインイン アカウント — `get_developer_account.py --check-manifest`
+- [ ] Entra: redirect URI×2 / Dynamics CRM **mcp.tools** / クライアントシークレット（.env）— `scripts/setup_entra_oauth.ps1`
+- [ ] Entra: **テナント管理者の事前同意（admin consent）**が付与済み（未同意だと Cowork 初回同意がサイレントに失敗 → troubleshooting #22）
+- [ ] Power Platform: Entra の **Client ID** を許可された MCP クライアントとして登録・有効化— `scripts/register_mcp_client.py`（`--check` で検証）
+- [ ] （自前 MCP Server 併用時）`verify_mcp_server.py` が **Streamable HTTP 準拠 OK** を返し、`tools/list` の実測名と `mcpToolDescription` が一致
+- [ ] 上記3層を `scripts/diagnose_cowork_connector.py` で一括確認（すべて ✅）
+- [ ] Teams ポータル **OAuth client registration**（SSO ではない）: Base URL は `/api/mcp` なし、scope は `.default offline_access`、Restrict by app = Any Teams app → registrationId を manifest に反映
+- [ ] manifest 1.29・`mcpToolDescription` なし（動的ツール検出）。固定にする場合だけ `mcpToolDescription: { file: "dataverse-mcp-tools.json" }`（JSONツール定義）
+- [ ] コネクタ `id` がプラグイン固有（`<plugin-slug>-dataverse-mcp`。汎用の `dataverse-mcp` ではない）で、手元のほかのプラグインと重ならない — `check_connector_ids.py --scan`（#50）
+- [ ] 提案するスキル・数字を扱うスキルは、`<!-- include: display-rules.md -->`・「このスキルのグラフ」・図の位置とレポートの行のあるひな形で、Render UI のグラフ・表・HTML レポートを返す — `check_visual_output.py --compose`・[visual-output.md](references/visual-output.md)（#52・#53）
+- [ ] 各スキルに「使うツール / 呼ばないツール」と「`describe` が使えなければ止める」がある — `rehearse_plugin.py tools`
+- [ ] ZIP ルートに manifest.json、skills/<name>/SKILL.md（固定ツール定義なら参照先 JSON も）
+- [ ] 公開前リハーサル（`rehearse_plugin.py tools` と、各スキルの `run`）で、提示 → 承認 → 登録 → 読み戻しが意図どおり
+- [ ] 新規は `stageCustomApp(DEPLOY)` → `agent-publish`（FINALIZEPACKAGE）→ `agent-allow` → `agent-lifecycle`（DEPLOY）を PLAN_HASH 承認後に順に送り、各 `Success` を確認
+- [ ] 管理センター private API で登録・公開（API 不可のときだけ管理センター fallback）し、Tools → Plugins と Cowork で読み戻した
+- [ ] Agent Registry で Publish→Status=Available（Graph 登録成功とは別に確認）
+- [ ] Cowork に表示 → 初回同意 → **新しいタスクで `describe` が呼ばれ**データ取得成功（ツール 0 件なら `check_oauth_signins.py` → #46）
+- [ ] 更新時: version をインクリメント（id 据え置き）→ Graph 更新または管理センター fallback → Publish
+
+## 参考リンク
+
+- [Build plugins for Cowork (Frontier)](https://learn.microsoft.com/en-us/microsoft-365/copilot/cowork/cowork-plugin-development)
+- [Configure authentication for MCP and API plugins](https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/plugin-authentication)
+- [ポータル API 自動化](references/portal-api-automation.md)
+- [Dataverse MCP 登録](../standard/references/dataverse-mcp-setup.md)
+- [自前 MCP Server の構築](../mcp-server/SKILL.md) / [コネクタ化の差分手順](references/custom-mcp-connector.md)
