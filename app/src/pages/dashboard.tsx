@@ -27,7 +27,7 @@ export default function Dashboard() {
       <div className="space-y-6">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">{CODEAPPS_APP_NAME}</h1>
-          <p className="text-muted-foreground">テスト状況の概要</p>
+          <p className="text-muted-foreground">テスト状況の概要は以下を参照してください</p>
         </div>
         <QueryState
           loading={loading}
@@ -57,7 +57,7 @@ export default function Dashboard() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">{CODEAPPS_APP_NAME}</h1>
-          <p className="text-muted-foreground">テスト状況の概要</p>
+          <p className="text-muted-foreground">テスト状況の概要★</p>
         </div>
         <Button asChild variant="outline">
           <Link to="/test-cases">テストケースを管理する<ArrowRight className="h-4 w-4" /></Link>
